@@ -17,8 +17,10 @@ import yaml
 
 from mendrune import executor
 from mendrune.errors import MendRuneError
+from mendrune.goose import adapt_patch, write_evidence_bundle
 from mendrune.models import ExecutionConfig
 from mendrune.oracle import evaluate_oracle_result
+from mendrune.patches import parse_patch
 from mendrune.policy import matches_path
 from mendrune.regression import (
     evaluate_required_regression,
@@ -44,6 +46,8 @@ class FrozenPatch:
     effective_path: PurePosixPath
     effective_sha256: str
     effective_kind: str = "supplied"
+    derived_from_sha256: str | None = None
+    recipe_sha256: str | None = None
 
 
 @dataclass
@@ -1536,6 +1540,15 @@ def prepare_preflight(campaign_path: Path, *, run_id: str | None = None) -> Pref
                             "path": item.effective_path.as_posix(),
                             "sha256": item.effective_sha256,
                         },
+                        **(
+                            {
+                                "derived_from_sha256": item.derived_from_sha256,
+                                "recipe_sha256": item.recipe_sha256,
+                                "accepted_by": "deterministic_campaign_verifier",
+                            }
+                            if item.effective_kind == "goose_adapted"
+                            else {}
+                        ),
                     }
                     for item in frozen
                 ],
@@ -1566,29 +1579,97 @@ def _capture_patches(store: RunStore, verified: VerifiedCampaign) -> tuple[Froze
     }
     for patch in verified.patches:
         configured = patch_config[(patch.unit_id, patch.patch_id)]
-        if configured.adapt_with_goose:
-            raise MendRuneError(
-                "Goose adaptation is outside P6-T01",
-                reason_code="goose_adaptation_not_implemented",
-            )
         sequence = sequence_by_unit.get(patch.unit_id, 0) + 1
         sequence_by_unit[patch.unit_id] = sequence
         data = _read_verified_patch(patch)
         relative = PurePosixPath("input", "patches", patch.unit_id, f"{sequence:02d}-supplied.diff")
         destination = store.path.joinpath(*relative.parts)
         _write_bytes_atomic(destination, data)
-        destination.chmod(0o400)
-        frozen.append(
-            FrozenPatch(
-                unit_id=patch.unit_id,
-                patch_id=patch.patch_id,
-                supplied_path=relative,
-                supplied_sha256=patch.sha256,
-                effective_path=relative,
-                effective_sha256=patch.sha256,
+        if configured.adapt_with_goose:
+            frozen.append(_capture_adaptation(store, verified, patch, relative, data))
+        else:
+            frozen.append(
+                FrozenPatch(
+                    unit_id=patch.unit_id,
+                    patch_id=patch.patch_id,
+                    supplied_path=relative,
+                    supplied_sha256=patch.sha256,
+                    effective_path=relative,
+                    effective_sha256=patch.sha256,
+                )
             )
-        )
+        destination.chmod(0o400)
     return tuple(frozen)
+
+
+def _capture_adaptation(
+    store: RunStore,
+    verified: VerifiedCampaign,
+    patch: VerifiedPatch,
+    supplied_path: PurePosixPath,
+    supplied: bytes,
+) -> FrozenPatch:
+    config = verified.config.goose
+    assert config.enabled and config.recipe is not None
+    recipe = (verified.path.parent / config.recipe).resolve(strict=True)
+    recipe_bytes = recipe.read_bytes()
+    recipe_sha256 = hashlib.sha256(recipe_bytes).hexdigest()
+    parsed_supplied = parse_patch(supplied, verified.config.patch_policy)
+    workspace_parent = store.path / ".adaptation-workspaces"
+    with Worktree.create(verified.repository, workspace_parent) as worktree:
+        contexts: list[bytes] = []
+        for changed_file in parsed_supplied.files:
+            path = changed_file.old_path or changed_file.new_path
+            assert path is not None
+            source = worktree.path.joinpath(*path.parts)
+            if source.is_file() and not source.is_symlink():
+                contexts.append(f"\n--- {path.as_posix()} ---\n".encode() + source.read_bytes())
+        evidence = (
+            store.path / "adaptations" / patch.unit_id / patch.patch_id / "evidence-bundle.md"
+        )
+        write_evidence_bundle(
+            evidence,
+            unit_id=patch.unit_id,
+            patch_id=patch.patch_id,
+            supplied_patch=supplied,
+            supplied_sha256=patch.sha256,
+            policy=verified.config.patch_policy,
+            source_context=b"".join(contexts),
+            application_diagnostic="adaptation explicitly requested by campaign",
+            maximum_bytes=config.maximum_bundle_bytes,
+        )
+        adapted = adapt_patch(
+            recipe,
+            evidence,
+            maximum_response_bytes=config.maximum_response_bytes,
+            timeout_seconds=config.timeout_seconds,
+        )
+        adapted_relative = PurePosixPath(
+            "adaptations", patch.unit_id, patch.patch_id, "adapted.diff"
+        )
+        adapted_path = store.path.joinpath(*adapted_relative.parts)
+        _write_bytes_atomic(adapted_path, adapted)
+        try:
+            parse_patch(adapted, verified.config.patch_policy)
+            worktree.apply_patch(adapted_path, verified.config.patch_policy)
+        except Exception as exc:
+            raise MendRuneError(
+                f"Goose adapted patch failed deterministic validation: {exc}",
+                reason_code="goose_adaptation_failed",
+            ) from exc
+        adapted_path.chmod(0o400)
+    shutil.rmtree(workspace_parent, ignore_errors=True)
+    return FrozenPatch(
+        unit_id=patch.unit_id,
+        patch_id=patch.patch_id,
+        supplied_path=supplied_path,
+        supplied_sha256=patch.sha256,
+        effective_path=adapted_relative,
+        effective_sha256=hashlib.sha256(adapted).hexdigest(),
+        effective_kind="goose_adapted",
+        derived_from_sha256=patch.sha256,
+        recipe_sha256=recipe_sha256,
+    )
 
 
 def _read_verified_patch(patch: VerifiedPatch) -> bytes:

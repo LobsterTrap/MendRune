@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P9/P10 — optional adaptation and release hardening
-- **Active task:** P9-T01
-- **Last completed:** P8-T04
-- **Next action:** Add the schema-constrained Goose recipe and bounded one-time adaptation pipeline, then complete hostile-input and documentation parity checks.
+- **Active task:** P10-T02
+- **Last completed:** P10-T01
+- **Next action:** Reconcile README/specification with the implemented CLI and add a runnable documented example campaign, then execute the final matrix and review.
 - **Known blockers:** Qualified runtime tests require `MENDRUNE_RUNTIME_TEST_IMAGE` to name a locally available immutable digest image; six security tests skip explicitly until supplied.
 - **Checkpoint state:** Deterministic P0–P8 implementation is committed through full campaign acceptance, with runtime tests present and gated on qualified infrastructure.
 - **Resume protocol:** Run the Astral quality gates and `pytest -m runtime` with a qualified local image when available. Keep Goose unable to affect deterministic acceptance checks.
@@ -41,7 +41,7 @@
 | P6 | Phase A baseline vertical slice | DONE | P3–P5 |
 | P7 | Phase B isolated remediation units | DONE | P6 |
 | P8 | Phase C cumulative composition and final verdict | DONE | P7 |
-| P9 | Optional Goose adaptation | NOT_STARTED | P8 |
+| P9 | Optional Goose adaptation | DONE | P8 |
 | P10 | Hardening, end-to-end fixtures, release readiness | NOT_STARTED | P8–P9 |
 
 ---
@@ -386,27 +386,31 @@
 
 ### P9-T01 — Add and validate recipe
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P8
 - **Deliverables:** `recipes/adapt-patch.yaml` using only documented fields; `extensions: []`; schema-constrained transient response.
+- **Evidence recorded:** 2026-07-22 — recipe uses documented version/title/description/file parameter/prompt/extensions/settings/response schema fields; `goose recipe validate recipes/adapt-patch.yaml` exits 0.
 
 ### P9-T02 — Bounded evidence bundle and adapter
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P9-T01
 - **Deliverables:** One adaptation per enabled patch during input capture; strict response parsing; no prose recovery.
+- **Evidence recorded:** 2026-07-22 — bounded untrusted evidence bundles and one-shot Goose invocation parse only the final schema-shaped JSON line and reject timeout, failure, empty/oversized/malformed/extra responses and stderr recovery.
 
 ### P9-T03 — Freeze provenance and reuse bytes
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P9-T02
 - **Deliverables:** Preserve supplied/adapted bytes and hashes; reuse frozen effective patch in B/C/final; no stage readaptation.
+- **Evidence recorded:** 2026-07-22 — capture validates adapted syntax/policy/applicability once, stores immutable supplied/adapted bytes with derived and recipe hashes, and existing B/C/final paths consume only the frozen effective record.
 
 ### P9-T04 — Goose-negative tests
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P9-T03
 - **Acceptance:** Disabled path never invokes Goose; malformed/empty/out-of-policy output fails; model cannot affect verdict.
+- **Evidence recorded:** 2026-07-22 — disabled adaptation avoids Goose; adapter tests reject malformed/empty/extra/stderr/timeout output; deterministic parser, policy, applicability, and full campaign checks remain authoritative.
 
 ---
 
