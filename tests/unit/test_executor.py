@@ -47,6 +47,24 @@ def test_builds_hardened_podman_command(tmp_path: Path) -> None:
     assert execution.image in command
 
 
+def test_builds_bounded_tmpfs_and_capture_mount(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    invocation = Invocation(
+        image=config().image,
+        argv=("check",),
+        mounts=(Mount(output, "/output", False, 4096, True),),
+        environment={},
+        timeout_seconds=1,
+    )
+
+    command = build_podman_command(config(), invocation, container_name="bounded")
+
+    assert "--tmpfs" in command
+    assert "/output:rw,size=4096,mode=0700" in command
+    assert not any(str(output) in item for item in command)
+
+
 def test_rejects_unapproved_environment(tmp_path: Path) -> None:
     execution = config()
     invocation = Invocation(

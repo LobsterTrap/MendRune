@@ -21,6 +21,8 @@ class Mount:
     source: Path
     destination: str
     read_only: bool
+    tmpfs_limit_bytes: int | None = None
+    capture_to_source: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,12 +92,24 @@ def build_podman_command(
         command.extend(("--env", f"{key}={value}"))
     destinations: set[str] = set()
     for mount in invocation.mounts:
-        source = mount.source.resolve(strict=True)
         if mount.destination in destinations:
             raise MendRuneError("duplicate mount destination", reason_code="unsafe_path")
         destinations.add(mount.destination)
-        suffix = ":ro" if mount.read_only else ":rw"
-        command.extend(("--volume", f"{source}:{mount.destination}{suffix}"))
+        if mount.tmpfs_limit_bytes is not None:
+            if mount.read_only or mount.tmpfs_limit_bytes <= 0:
+                raise MendRuneError("invalid limited mount", reason_code="unsafe_path")
+            command.extend(
+                (
+                    "--tmpfs",
+                    f"{mount.destination}:rw,size={mount.tmpfs_limit_bytes},mode=0700",
+                )
+            )
+        else:
+            if mount.capture_to_source:
+                raise MendRuneError("capture requires a limited mount", reason_code="unsafe_path")
+            source = mount.source.resolve(strict=True)
+            suffix = ":ro" if mount.read_only else ":rw"
+            command.extend(("--volume", f"{source}:{mount.destination}{suffix}"))
     command.append(config.image)
     command.extend(invocation.argv)
     return command
@@ -105,6 +119,18 @@ def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
     """Run one named Podman container and return independently bounded output."""
     container_name = f"mendrune-{uuid.uuid4().hex}"
     command = build_podman_command(config, invocation, container_name=container_name)
+    captures: list[tuple[str, Path]] = []
+    for mount in invocation.mounts:
+        if not mount.capture_to_source:
+            continue
+        if mount.source.is_symlink():
+            raise MendRuneError("capture destination is a symlink", reason_code="unsafe_path")
+        source = mount.source.resolve(strict=True)
+        if not source.is_dir() or any(source.iterdir()):
+            raise MendRuneError(
+                "capture destination must be an empty directory", reason_code="unsafe_path"
+            )
+        captures.append((mount.destination, source))
     started_at = datetime.now(UTC)
     started = time.monotonic()
     process: subprocess.Popen[bytes] | None = None
@@ -149,6 +175,13 @@ def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
             reader.join(timeout=30)
         if any(reader.is_alive() for reader in readers) and lifecycle_error is None:
             lifecycle_error = RuntimeError("container output capture did not finish")
+        if process is not None:
+            for destination, source in captures:
+                capture_error = _container_command(
+                    "cp", f"{container_name}:{destination}/.", str(source)
+                )
+                if lifecycle_error is None:
+                    lifecycle_error = capture_error
         cleanup_error = _container_command("rm", "--force", "--ignore", container_name)
         if lifecycle_error is None:
             lifecycle_error = cleanup_error

@@ -1299,8 +1299,19 @@ def _run_isolated_command(
             executor.Mount(
                 prepared.store.path / "input/evidence", config.mounts.container_evidence_dir, True
             ),
-            executor.Mount(output, config.mounts.container_output_dir, False),
-            executor.Mount(scratch, "/tmp", False),
+            executor.Mount(
+                output,
+                config.mounts.container_output_dir,
+                False,
+                tmpfs_limit_bytes=config.execution.maximum_output_bytes,
+                capture_to_source=True,
+            ),
+            executor.Mount(
+                scratch,
+                "/tmp",
+                False,
+                tmpfs_limit_bytes=config.execution.maximum_output_bytes,
+            ),
         ),
         environment={**config.execution.environment, **(environment or {})},
         timeout_seconds=timeout_seconds,
@@ -1409,8 +1420,19 @@ def _run_command(
             executor.Mount(
                 prepared.store.path / "input/evidence", config.mounts.container_evidence_dir, True
             ),
-            executor.Mount(output, config.mounts.container_output_dir, False),
-            executor.Mount(scratch, "/tmp", False),
+            executor.Mount(
+                output,
+                config.mounts.container_output_dir,
+                False,
+                tmpfs_limit_bytes=config.execution.maximum_output_bytes,
+                capture_to_source=True,
+            ),
+            executor.Mount(
+                scratch,
+                "/tmp",
+                False,
+                tmpfs_limit_bytes=config.execution.maximum_output_bytes,
+            ),
         ),
         environment={**config.execution.environment, **(environment or {})},
         timeout_seconds=timeout_seconds,
