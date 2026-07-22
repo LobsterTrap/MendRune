@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P7-T01/P7-T02
-- **Last completed:** P6-T03
-- **Next action:** Complete isolated Phase B worktrees, deterministic checks, scanner comparison, and evidence persistence.
+- **Active task:** P7-T03
+- **Last completed:** P7-T02
+- **Next action:** Add multi-patch/multi-vulnerability isolated fixtures and failure coverage, then begin cumulative Phase C.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -329,15 +329,17 @@
 
 ### P7-T01 — Apply each unit from a fresh base worktree
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P6
 - **Deliverables:** Ordered patches, actual-diff accounting per patch, clean isolation from other units.
+- **Evidence recorded:** 2026-07-22 — unit tests create a fresh base worktree per composition-ordered unit, apply frozen patches in declared order, record placement/diff hashes, reject empty/tampered results, and remove isolated worktrees.
 
 ### P7-T02 — Verify unit mitigation/regressions/scans
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P7-T01
 - **Deliverables:** Unit oracles false, shared + unit regressions, scans vs Phase A, source integrity, evidence.
+- **Evidence recorded:** 2026-07-22 — isolated checks require owned oracle mitigation, run shared+unit regressions, normalize/compare scanners against Phase A, verify integrity after every command, persist manifests, and fail partial mitigation with stable evidence.
 
 ### P7-T03 — Multi-patch/multi-vulnerability isolated fixtures
 

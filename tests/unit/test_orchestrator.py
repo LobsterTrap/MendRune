@@ -1,4 +1,5 @@
 import hashlib
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -7,12 +8,17 @@ import yaml
 
 from mendrune.errors import MendRuneError
 from mendrune.executor import CapturedOutput, ExecutionResult
-from mendrune.orchestrator import execute_phase_a, prepare_preflight
+from mendrune.orchestrator import execute_phase_a, execute_phase_b, prepare_preflight
 from tests.integration.test_verify_cli import create_campaign
 
 
 def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     campaign = create_campaign(tmp_path)
+    repository = Path(yaml.safe_load(campaign.read_text())["repository"]["path"])
+    (repository / "src").mkdir()
+    (repository / "src/a.py").write_text("old\n")
+    subprocess.run(["git", "-C", repository, "add", "src/a.py"], check=True)
+    subprocess.run(["git", "-C", repository, "commit", "-qm", "fixture source"], check=True)
     monkeypatch.setattr("mendrune.orchestrator.executor.preflight", lambda config: None)
     return campaign, prepare_preflight(campaign, run_id="run-1")
 
@@ -104,6 +110,95 @@ def test_phase_a_executes_schedule_and_persists_normalized_evidence(
         == []
     )
     prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_phase_b_applies_unit_in_fresh_worktree_and_persists_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+    baseline_path = prepared.baseline.path
+    created_paths = []
+    from mendrune.repository import Worktree
+
+    original_create = Worktree.create
+
+    def create(*args, **kwargs):
+        worktree = original_create(*args, **kwargs)
+        created_paths.append(worktree.path)
+        return worktree
+
+    monkeypatch.setattr("mendrune.orchestrator.Worktree.create", create)
+    calls = []
+
+    def execute(config, invocation):
+        calls.append(invocation)
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: false\nobservation: mitigated\n"
+            )
+        elif len(calls) == 5:
+            (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
+        return _result(invocation)
+
+    assert execute_phase_b(prepared, (), execute=execute) == {"fix-a": ()}
+    assert created_paths and created_paths[0] != baseline_path
+    assert not created_paths[0].exists()
+    assert [call.argv for call in calls] == [
+        ("python", "-m", "build"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+    ]
+    patch_record = yaml.safe_load(
+        next((prepared.store.path / "phase-b/fix-a/patches").glob("*.yaml")).read_text()
+    )
+    assert patch_record["placements"][0]["path"] == "src/a.py"
+    assert (prepared.store.path / "phase-b/fix-a/manifest.yaml").is_file()
+    prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_phase_b_partial_mitigation_has_stable_failure_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+    worktree_paths = []
+    from mendrune.repository import Worktree
+
+    original_create = Worktree.create
+
+    def create(*args, **kwargs):
+        worktree = original_create(*args, **kwargs)
+        worktree_paths.append(worktree.path)
+        return worktree
+
+    monkeypatch.setattr("mendrune.orchestrator.Worktree.create", create)
+
+    def execute(config, invocation):
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: true\n"
+                "observation: still vulnerable\n"
+            )
+        return _result(invocation)
+
+    with pytest.raises(MendRuneError) as raised:
+        execute_phase_b(prepared, (), execute=execute)
+
+    assert raised.value.reason_code == "unit_vulnerability_not_mitigated"
+    assert not worktree_paths[0].exists()
+    assert (
+        yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"]
+        == "isolated_unit_failure"
+    )
+    failure = yaml.safe_load((prepared.store.path / "phase-b/fix-a/failure.yaml").read_text())
+    assert failure["reason_code"] == "unit_vulnerability_not_mitigated"
     prepared.close()
 
 
