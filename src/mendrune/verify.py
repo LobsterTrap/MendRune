@@ -32,6 +32,8 @@ class VerifiedCampaign:
     evidence: tuple[EvidenceFile, ...]
     evidence_root: Path
     runs_directory: Path
+    goose_recipe: Path | None
+    goose_recipe_sha256: str | None
 
 
 def verify_campaign(path: Path) -> VerifiedCampaign:
@@ -78,9 +80,12 @@ def verify_campaign(path: Path) -> VerifiedCampaign:
 
     _validate_generated_path_overlaps(config, patch_changed_paths)
 
+    recipe: Path | None = None
+    recipe_sha256: str | None = None
     if config.goose.enabled:
         assert config.goose.recipe is not None
         recipe = _regular_file(campaign_root, config.goose.recipe, "Goose recipe")
+        recipe_sha256 = hashlib.sha256(recipe.read_bytes()).hexdigest()
         validate_recipe(recipe, timeout_seconds=config.goose.timeout_seconds)
 
     runs_directory = _resolve_config_path(campaign_root, config.storage.runs_directory)
@@ -98,6 +103,8 @@ def verify_campaign(path: Path) -> VerifiedCampaign:
         evidence=evidence,
         evidence_root=evidence_root,
         runs_directory=runs_directory,
+        goose_recipe=recipe,
+        goose_recipe_sha256=recipe_sha256,
     )
 
 

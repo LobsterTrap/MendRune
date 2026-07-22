@@ -31,7 +31,7 @@ from mendrune.regression import (
 from mendrune.reporting import LIMITATIONS
 from mendrune.repository import TreeSnapshot, Worktree
 from mendrune.runstore import RunStore
-from mendrune.scanner import Finding, compare_findings, normalize_semgrep_json
+from mendrune.scanner import Finding, compare_findings, normalize_semgrep_json, read_scanner_output
 from mendrune.state import RunState, transition
 from mendrune.storage import capture_evidence, write_evidence_manifest
 from mendrune.verify import VerifiedCampaign, VerifiedPatch, verify_campaign
@@ -190,18 +190,23 @@ def execute_phase_a(
                     "unknown scanner normalizer", reason_code="scanner_output_invalid"
                 )
             normalized = normalize_semgrep_json(
-                raw_path.read_bytes(), config.scan_policy.severity_order
+                read_scanner_output(output, raw_path, config.execution.maximum_output_bytes),
+                scan.id,
+                config.scan_policy.severity_order,
             )
             findings.extend(normalized)
             prepared.store.write_yaml(
                 f"phase-a/scans/{sequence:04d}-{scan.id}.yaml",
                 {
                     "schema_version": 1,
+                    "check_id": f"phase-a-{sequence:04d}-scanner-{scan.id}",
                     "scanner_id": scan.id,
+                    "status": "passed",
                     "findings": [_finding_record(item) for item in normalized],
                 },
             )
         prepared.baseline.verify_integrity(snapshot, config.execution.allowed_generated_paths)
+        _write_unit_manifest(prepared.store, "phase-a")
         prepared.store.write_hash_manifest()
         return tuple(sorted(findings, key=lambda item: item.identity))
     except Exception as exc:
@@ -394,10 +399,12 @@ def execute_phase_b(
                     raise MendRuneError(
                         "unknown scanner normalizer", reason_code="scanner_output_invalid"
                     )
+                raw_path = _container_output_path(
+                    output, config.mounts.container_output_dir, scan.raw_output
+                )
                 normalized = normalize_semgrep_json(
-                    _container_output_path(
-                        output, config.mounts.container_output_dir, scan.raw_output
-                    ).read_bytes(),
+                    read_scanner_output(output, raw_path, config.execution.maximum_output_bytes),
+                    scan.id,
                     config.scan_policy.severity_order,
                 )
                 findings.extend(normalized)
@@ -405,7 +412,9 @@ def execute_phase_b(
                     f"{root}/scans/{sequence:04d}-{scan.id}.yaml",
                     {
                         "schema_version": 1,
+                        "check_id": f"{root.replace('/', '-')}-{sequence:04d}-scanner-{scan.id}",
                         "scanner_id": scan.id,
+                        "status": "passed",
                         "findings": [_finding_record(item) for item in normalized],
                     },
                 )
@@ -721,10 +730,12 @@ def execute_phase_c(
                     raise MendRuneError(
                         "unknown scanner normalizer", reason_code="scanner_output_invalid"
                     )
+                raw_path = _container_output_path(
+                    output, config.mounts.container_output_dir, scan.raw_output
+                )
                 normalized = normalize_semgrep_json(
-                    _container_output_path(
-                        output, config.mounts.container_output_dir, scan.raw_output
-                    ).read_bytes(),
+                    read_scanner_output(output, raw_path, config.execution.maximum_output_bytes),
+                    scan.id,
                     config.scan_policy.severity_order,
                 )
                 findings.extend(normalized)
@@ -732,7 +743,9 @@ def execute_phase_c(
                     f"{root}/scans/{sequence:04d}-{scan.id}.yaml",
                     {
                         "schema_version": 1,
+                        "check_id": f"{root.replace('/', '-')}-{sequence:04d}-scanner-{scan.id}",
                         "scanner_id": scan.id,
+                        "status": "passed",
                         "findings": [_finding_record(item) for item in normalized],
                     },
                 )
@@ -931,10 +944,12 @@ def _execute_final_verification(
         )
         if scan.normalizer != "semgrep":
             raise MendRuneError("unknown scanner normalizer", reason_code="scanner_output_invalid")
+        raw_path = _container_output_path(
+            output, config.mounts.container_output_dir, scan.raw_output
+        )
         normalized = normalize_semgrep_json(
-            _container_output_path(
-                output, config.mounts.container_output_dir, scan.raw_output
-            ).read_bytes(),
+            read_scanner_output(output, raw_path, config.execution.maximum_output_bytes),
+            scan.id,
             config.scan_policy.severity_order,
         )
         findings.extend(normalized)
@@ -942,7 +957,9 @@ def _execute_final_verification(
             f"{root}/scans/{sequence:04d}-{scan.id}.yaml",
             {
                 "schema_version": 1,
+                "check_id": f"final-{sequence:04d}-scanner-{scan.id}",
                 "scanner_id": scan.id,
+                "status": "passed",
                 "findings": [_finding_record(item) for item in normalized],
             },
         )
@@ -1610,10 +1627,19 @@ def _capture_adaptation(
     supplied: bytes,
 ) -> FrozenPatch:
     config = verified.config.goose
-    assert config.enabled and config.recipe is not None
-    recipe = (verified.path.parent / config.recipe).resolve(strict=True)
-    recipe_bytes = recipe.read_bytes()
-    recipe_sha256 = hashlib.sha256(recipe_bytes).hexdigest()
+    assert config.enabled and verified.goose_recipe is not None
+    assert verified.goose_recipe_sha256 is not None
+    recipe_bytes = verified.goose_recipe.read_bytes()
+    if hashlib.sha256(recipe_bytes).hexdigest() != verified.goose_recipe_sha256:
+        raise MendRuneError(
+            "Goose recipe changed after validation", reason_code="input_capture_race"
+        )
+    frozen_recipe = store.path / "input/recipes/adapt-patch.yaml"
+    if not frozen_recipe.exists():
+        _write_bytes_atomic(frozen_recipe, recipe_bytes)
+        frozen_recipe.chmod(0o400)
+    recipe = frozen_recipe
+    recipe_sha256 = verified.goose_recipe_sha256
     parsed_supplied = parse_patch(supplied, verified.config.patch_policy)
     workspace_parent = store.path / ".adaptation-workspaces"
     with Worktree.create(verified.repository, workspace_parent) as worktree:
