@@ -52,6 +52,7 @@ def verify_campaign(path: Path) -> VerifiedCampaign:
 
     patches: list[VerifiedPatch] = []
     patch_changed_paths: set[str] = set()
+    campaign_changed_lines = 0
     for unit in config.units:
         for patch in unit.patches:
             patch_path = _regular_file(campaign_root, patch.path, "patch")
@@ -63,6 +64,12 @@ def verify_campaign(path: Path) -> VerifiedCampaign:
                     reason_code="patch_hash_mismatch",
                 )
             parsed = parse_patch(patch_bytes, config.patch_policy)
+            campaign_changed_lines += parsed.changed_lines
+            if campaign_changed_lines > config.patch_policy.max_changed_lines_campaign:
+                raise ConfigurationError(
+                    "campaign patches change too many lines",
+                    reason_code="patch_policy_violation",
+                )
             for changed_file in parsed.files:
                 changed = changed_file.new_path or changed_file.old_path
                 if changed is not None:

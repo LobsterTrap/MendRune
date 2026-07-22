@@ -47,6 +47,16 @@ def test_verify_command_rejects_tampered_patch(tmp_path: Path, capsys) -> None:
     assert "patch_hash_mismatch" in capsys.readouterr().err
 
 
+def test_verify_rejects_campaign_wide_patch_line_limit(tmp_path: Path, capsys) -> None:
+    campaign = create_campaign(tmp_path)
+    data = yaml.safe_load(campaign.read_text())
+    data["patch_policy"]["max_changed_lines_campaign"] = 1
+    write_campaign(campaign, data)
+
+    assert main(["verify", str(campaign)]) == 2
+    assert "patch_policy_violation" in capsys.readouterr().err
+
+
 def test_verify_does_not_modify_dirty_source_worktree(tmp_path: Path) -> None:
     campaign = create_campaign(tmp_path)
     data = yaml.safe_load(campaign.read_text())
