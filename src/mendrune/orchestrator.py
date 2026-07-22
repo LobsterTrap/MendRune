@@ -1041,7 +1041,6 @@ def _execute_final_verification(
     _write_unit_manifest(prepared.store, root)
     prepared.store.write_hash_manifest()
     prepared.store.verify_hash_manifest()
-    _verify_final_evidence(prepared)
     _advance(prepared.store, prepared.verified, state, RunState.ASSEMBLING_EVIDENCE)
     prepared.store.write_yaml(
         f"{root}/verdict-prep.yaml",
@@ -1080,33 +1079,195 @@ def _remove_allowed_generated(
 
 
 def _verify_final_evidence(prepared: PreflightRun) -> None:
-    required = [
-        "input/campaign.yaml",
-        "input/repository.yaml",
-        "input/patches.yaml",
-        "input/evidence-manifest.yaml",
-        "final/combined.diff",
-        "final/supplied-series.yaml",
-        "final/scan-comparison.yaml",
-        "final/manifest.yaml",
-    ]
-    if (prepared.store.path / "phase-b").exists():
-        required.extend(
-            f"phase-b/{unit_id}/manifest.yaml"
-            for unit_id in prepared.verified.config.composition.order
-        )
-    required.extend(
-        f"phase-c/stages/{index:04d}-{unit_id}/manifest.yaml"
-        for index, unit_id in enumerate(prepared.verified.config.composition.order, start=1)
-    )
-    for relative in required:
-        prepared.store.artifact(relative)
-    for check in prepared.store.path.glob("**/checks/*.yaml"):
-        document = yaml.safe_load(check.read_text(encoding="utf-8"))
-        if not isinstance(document, dict) or document.get("status") != "passed":
-            raise MendRuneError(
-                f"required check is not passing: {check}", reason_code="required_check_missing"
+    """Require the exact successful evidence schedule from the frozen campaign."""
+    config = prepared.verified.config
+    units = {unit.id: unit for unit in config.units}
+    expected: dict[str, dict[str, object]] = {}
+    manifests = ["phase-a/manifest.yaml", "final/manifest.yaml"]
+
+    def add(path: str, check_id: str, **mapping: object) -> None:
+        expected[path] = {"schema_version": 1, "status": "passed", "check_id": check_id, **mapping}
+
+    def command(root: str, sequence: int, kind: str, command_id: str) -> None:
+        stem = f"{sequence:04d}-{kind}-{command_id}"
+        check_id = f"{root.replace('/', '-')}-{stem}"
+        add(f"{root}/checks/{stem}.yaml", check_id, kind=kind, command_id=command_id)
+        add(f"{root}/checks/{stem}-integrity.yaml", f"{check_id}-integrity")
+
+    sequence = 1
+    command("phase-a", sequence, "build", "build")
+    for scheduled in select_shared_regressions(config):
+        sequence += 1
+        command("phase-a", sequence, "regression", scheduled.command.id)
+    for unit in config.units:
+        for vulnerability in unit.vulnerabilities:
+            sequence += 1
+            command("phase-a", sequence, "oracle", vulnerability.id)
+            add(
+                f"phase-a/oracles/{sequence:04d}-{vulnerability.id}.yaml",
+                f"phase-a-{sequence:04d}-oracle-{vulnerability.id}",
             )
+    for scan in config.commands.scans:
+        sequence += 1
+        command("phase-a", sequence, "scanner", scan.id)
+        add(
+            f"phase-a/scans/{sequence:04d}-{scan.id}.yaml",
+            f"phase-a-{sequence:04d}-scanner-{scan.id}",
+            scanner_id=scan.id,
+        )
+
+    applied: list[str] = []
+    for stage, unit_id in enumerate(config.composition.order, 1):
+        unit = units[unit_id]
+        root = f"phase-b/{unit_id}"
+        manifests.append(f"{root}/manifest.yaml")
+        sequence = len(unit.patches) + 1
+        command(root, sequence, "build", "build")
+        for vulnerability in unit.vulnerabilities:
+            sequence += 1
+            command(root, sequence, "oracle", vulnerability.id)
+            add(
+                f"{root}/oracles/{sequence:04d}-{vulnerability.id}.yaml",
+                f"phase-b-{unit_id}-{sequence:04d}-oracle-{vulnerability.id}",
+            )
+        for scheduled in select_unit_regressions(config, unit_id):
+            sequence += 1
+            command(root, sequence, "regression", scheduled.command.id)
+        for scan in config.commands.scans:
+            sequence += 1
+            command(root, sequence, "scanner", scan.id)
+            add(
+                f"{root}/scans/{sequence:04d}-{scan.id}.yaml",
+                f"phase-b-{unit_id}-{sequence:04d}-scanner-{scan.id}",
+                scanner_id=scan.id,
+            )
+
+        root = f"phase-c/stages/{stage:04d}-{unit_id}"
+        manifests.append(f"{root}/manifest.yaml")
+        sequence = 0
+        for vulnerability in unit.vulnerabilities:
+            sequence += 1
+            command(root, sequence, "preapply-oracle", vulnerability.id)
+            add(
+                f"{root}/oracles/{sequence:04d}-preapply-{vulnerability.id}.yaml",
+                f"phase-c-{stage:04d}-preapply-{vulnerability.id}",
+            )
+        sequence += len(unit.patches) + 1
+        command(root, sequence, "build", "build")
+        applied.append(unit_id)
+        for prior_id in applied:
+            for vulnerability in units[prior_id].vulnerabilities:
+                sequence += 1
+                command(root, sequence, "oracle", vulnerability.id)
+                add(
+                    f"{root}/oracles/{sequence:04d}-{vulnerability.id}.yaml",
+                    f"phase-c-{stage:04d}-{sequence:04d}-oracle-{vulnerability.id}",
+                )
+        for scheduled in select_accumulated_regressions(config, applied):
+            sequence += 1
+            command(root, sequence, "regression", scheduled.command.id)
+        for scan in config.commands.scans:
+            sequence += 1
+            command(root, sequence, "scanner", scan.id)
+            add(
+                f"{root}/scans/{sequence:04d}-{scan.id}.yaml",
+                f"{root.replace('/', '-')}-{sequence:04d}-scanner-{scan.id}",
+                scanner_id=scan.id,
+            )
+
+    add("final/checks/0000-initial-integrity.yaml", "final-0000-initial-integrity")
+    sequence = 1
+    command("final", sequence, "build", "build")
+    for unit_id in config.composition.order:
+        for vulnerability in units[unit_id].vulnerabilities:
+            sequence += 1
+            command("final", sequence, "oracle", vulnerability.id)
+            add(
+                f"final/oracles/{sequence:04d}-{vulnerability.id}.yaml",
+                f"final-{sequence:04d}-oracle-{vulnerability.id}",
+            )
+    for scheduled in select_accumulated_regressions(config, config.composition.order):
+        sequence += 1
+        command("final", sequence, "regression", scheduled.command.id)
+    for scan in config.commands.scans:
+        sequence += 1
+        command("final", sequence, "scanner", scan.id)
+        add(
+            f"final/scans/{sequence:04d}-{scan.id}.yaml",
+            f"final-{sequence:04d}-scanner-{scan.id}",
+            scanner_id=scan.id,
+        )
+    add(
+        f"final/checks/{sequence + 1:04d}-final-integrity.yaml",
+        f"final-{sequence + 1:04d}-final-integrity",
+    )
+
+    try:
+        required = [
+            "input/campaign.yaml",
+            "input/repository.yaml",
+            "input/patches.yaml",
+            "input/evidence-manifest.yaml",
+            "final/combined.diff",
+            "final/supplied-series.yaml",
+            "final/scan-comparison.yaml",
+            *manifests,
+        ]
+        for relative in required:
+            prepared.store.artifact(relative)
+        actual = {
+            path.relative_to(prepared.store.path).as_posix()
+            for pattern in ("**/checks/*.yaml", "**/oracles/*.yaml", "**/scans/*.yaml")
+            for path in prepared.store.path.glob(pattern)
+        }
+        if actual != set(expected):
+            raise ValueError("evidence record set differs from frozen schedule")
+        for relative, mapping in expected.items():
+            document = yaml.safe_load((prepared.store.path / relative).read_text())
+            if not isinstance(document, dict) or any(
+                document.get(k) != v for k, v in mapping.items()
+            ):
+                raise ValueError(f"invalid required record: {relative}")
+        comparisons = [f"phase-b/{u}/scan-comparison.yaml" for u in config.composition.order]
+        comparisons += [
+            f"phase-c/stages/{i:04d}-{u}/scan-comparison.yaml"
+            for i, u in enumerate(config.composition.order, 1)
+        ]
+        comparisons.append("final/scan-comparison.yaml")
+        for relative in comparisons:
+            if (
+                yaml.safe_load((prepared.store.path / relative).read_text()).get("status")
+                != "passed"
+            ):
+                raise ValueError(f"nonpassing comparison: {relative}")
+        for relative in manifests:
+            path = prepared.store.path / relative
+            document = yaml.safe_load(path.read_text())
+            files = document.get("files") if isinstance(document, dict) else None
+            if (
+                document.get("schema_version") != 1
+                or document.get("algorithm") != "sha256"
+                or not isinstance(files, list)
+            ):
+                raise ValueError(f"invalid manifest: {relative}")
+            mapped = [item.get("path") for item in files if isinstance(item, dict)]
+            actual_files = sorted(
+                x.relative_to(path.parent).as_posix()
+                for x in path.parent.rglob("*")
+                if x.is_file() and x.name != "manifest.yaml"
+            )
+            if sorted(mapped) != actual_files or len(mapped) != len(set(mapped)):
+                raise ValueError(f"incomplete manifest: {relative}")
+            for item in files:
+                artifact = prepared.store.artifact(
+                    (path.parent / item["path"]).relative_to(prepared.store.path).as_posix()
+                )
+                if (item.get("size"), item.get("sha256")) != (artifact.size, artifact.sha256):
+                    raise ValueError(f"invalid manifest mapping: {relative}")
+    except Exception as exc:
+        raise MendRuneError(
+            "required campaign evidence is missing or invalid", reason_code="required_check_missing"
+        ) from exc
 
 
 def _run_isolated_command(
