@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P5-T04/P6-T02
-- **Last completed:** P6-T01
-- **Next action:** Add qualified-host runtime security tests and execute/persist Phase A build, regression, oracle, scan, and integrity checks.
+- **Active task:** P6-T03
+- **Last completed:** P6-T02
+- **Next action:** Add the baseline end-to-end fixture and failure matrix, then proceed to isolated Phase B worktrees.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -311,9 +311,10 @@
 
 ### P6-T02 — Execute baseline build/regressions/oracles/scans
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P6-T01
 - **Deliverables:** Build, shared regressions, every vulnerability reproduces, scans normalize, source-integrity checks after every command.
+- **Evidence recorded:** 2026-07-22 — injected-executor tests run the complete baseline schedule, validate nonce-bound vulnerable oracle results and Semgrep output, persist bounded logs/checks/findings, hash evidence, and fail closed on source mutation.
 
 ### P6-T03 — Baseline end-to-end fixture
 

@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Self
 
 from mendrune import executor
 from mendrune.errors import MendRuneError
-from mendrune.repository import Worktree
+from mendrune.models import ExecutionConfig
+from mendrune.oracle import evaluate_oracle_result
+from mendrune.regression import evaluate_required_regression, select_shared_regressions
+from mendrune.repository import TreeSnapshot, Worktree
 from mendrune.runstore import RunStore
+from mendrune.scanner import Finding, normalize_semgrep_json
 from mendrune.state import RunState, transition
 from mendrune.storage import capture_evidence, write_evidence_manifest
 from mendrune.verify import VerifiedCampaign, VerifiedPatch, verify_campaign
@@ -48,7 +54,9 @@ class PreflightRun:
         except Exception as exc:
             cleanup_error = exc
         try:
-            self._workspace_parent.rmdir()
+            shutil.rmtree(self._workspace_parent)
+        except FileNotFoundError:
+            pass
         except OSError as exc:
             cleanup_error = cleanup_error or exc
         self._closed = True
@@ -62,6 +70,249 @@ class PreflightRun:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
+
+
+Executor = Callable[[ExecutionConfig, executor.Invocation], executor.ExecutionResult]
+
+
+def execute_phase_a(
+    prepared: PreflightRun, *, execute: Executor = executor.execute
+) -> tuple[Finding, ...]:
+    """Execute and persist the complete Phase A baseline schedule."""
+    config = prepared.verified.config
+    snapshot = prepared.baseline.snapshot()
+    findings: list[Finding] = []
+    sequence = 0
+    try:
+        sequence += 1
+        _run_command(
+            prepared,
+            execute,
+            snapshot,
+            sequence,
+            "build",
+            "build",
+            config.commands.build.argv,
+            config.commands.build.timeout_seconds,
+        )
+        for scheduled in select_shared_regressions(config):
+            command = scheduled.command
+            sequence += 1
+            result, _ = _run_command(
+                prepared,
+                execute,
+                snapshot,
+                sequence,
+                "regression",
+                command.id,
+                command.argv,
+                command.timeout_seconds,
+            )
+            evaluated = evaluate_required_regression(
+                command.id, exit_code=result.exit_code, timed_out=result.timed_out
+            )
+            if not evaluated.passed:
+                raise MendRuneError(
+                    "baseline regression failed",
+                    reason_code=evaluated.reason_code or "regression_failed",
+                )
+        for unit in config.units:
+            for vulnerability in unit.vulnerabilities:
+                sequence += 1
+                nonce = secrets.token_hex(16)
+                result, output = _run_command(
+                    prepared,
+                    execute,
+                    snapshot,
+                    sequence,
+                    "oracle",
+                    vulnerability.id,
+                    vulnerability.oracle.argv,
+                    vulnerability.oracle.timeout_seconds,
+                    environment={"MENDRUNE_ORACLE_NONCE": nonce},
+                )
+                result_path = _container_output_path(
+                    output, config.mounts.container_output_dir, vulnerability.oracle.result_file
+                )
+                observation = evaluate_oracle_result(
+                    output,
+                    result_path,
+                    expected_nonce=nonce,
+                    expected_vulnerable=True,
+                    exit_code=result.exit_code if result.exit_code is not None else -1,
+                    timed_out=result.timed_out,
+                )
+                prepared.store.write_yaml(
+                    f"phase-a/oracles/{sequence:04d}-{vulnerability.id}.yaml",
+                    {
+                        "schema_version": 1,
+                        "check_id": f"phase-a-{sequence:04d}-oracle-{vulnerability.id}",
+                        "status": "passed",
+                        "vulnerable": observation.vulnerable,
+                        "observation": observation.observation,
+                    },
+                )
+        for scan in config.commands.scans:
+            sequence += 1
+            result, output = _run_command(
+                prepared,
+                execute,
+                snapshot,
+                sequence,
+                "scanner",
+                scan.id,
+                scan.argv,
+                scan.timeout_seconds,
+            )
+            if result.timed_out:
+                raise MendRuneError("baseline scanner timed out", reason_code="command_timed_out")
+            if result.exit_code != 0:
+                raise MendRuneError("baseline scanner failed", reason_code="scanner_failed")
+            raw_path = _container_output_path(
+                output, config.mounts.container_output_dir, scan.raw_output
+            )
+            if scan.normalizer != "semgrep":
+                raise MendRuneError(
+                    "unknown scanner normalizer", reason_code="scanner_output_invalid"
+                )
+            normalized = normalize_semgrep_json(
+                raw_path.read_bytes(), config.scan_policy.severity_order
+            )
+            findings.extend(normalized)
+            prepared.store.write_yaml(
+                f"phase-a/scans/{sequence:04d}-{scan.id}.yaml",
+                {
+                    "schema_version": 1,
+                    "scanner_id": scan.id,
+                    "findings": [_finding_record(item) for item in normalized],
+                },
+            )
+        prepared.baseline.verify_integrity(snapshot, config.execution.allowed_generated_paths)
+        prepared.store.write_hash_manifest()
+        return tuple(sorted(findings, key=lambda item: item.identity))
+    except Exception as exc:
+        reason = exc.reason_code if isinstance(exc, MendRuneError) else "unexpected_internal_error"
+        prepared.store.write_yaml(
+            "phase-a/failure.yaml",
+            {"schema_version": 1, "status": "failed", "reason_code": reason},
+        )
+        _advance(
+            prepared.store, prepared.verified, RunState.PHASE_A_BASELINE, RunState.BASELINE_FAILURE
+        )
+        prepared.store.write_hash_manifest()
+        if isinstance(exc, MendRuneError):
+            raise
+        raise MendRuneError("unexpected Phase A failure", reason_code=reason) from exc
+
+
+def _run_command(
+    prepared: PreflightRun,
+    execute: Executor,
+    snapshot: TreeSnapshot,
+    sequence: int,
+    kind: str,
+    command_id: str,
+    argv: tuple[str, ...],
+    timeout_seconds: int,
+    *,
+    environment: dict[str, str] | None = None,
+) -> tuple[executor.ExecutionResult, Path]:
+    config = prepared.verified.config
+    stem = f"{sequence:04d}-{kind}-{command_id}"
+    output = prepared.store.path / "phase-a/outputs" / stem
+    scratch = prepared._workspace_parent / "scratch" / stem
+    output.mkdir(parents=True, mode=0o700)
+    scratch.mkdir(parents=True, mode=0o700)
+    invocation = executor.Invocation(
+        image=config.execution.image,
+        argv=argv,
+        mounts=(
+            executor.Mount(prepared.baseline.path, config.execution.container_workdir, False),
+            executor.Mount(
+                prepared.store.path / "input/evidence", config.mounts.container_evidence_dir, True
+            ),
+            executor.Mount(output, config.mounts.container_output_dir, False),
+            executor.Mount(scratch, "/tmp", False),
+        ),
+        environment={**config.execution.environment, **(environment or {})},
+        timeout_seconds=timeout_seconds,
+    )
+    result: executor.ExecutionResult | None = None
+    try:
+        result = execute(config.execution, invocation)
+        _write_bytes_atomic(prepared.store.path / f"phase-a/logs/{stem}.stdout", result.stdout.data)
+        _write_bytes_atomic(prepared.store.path / f"phase-a/logs/{stem}.stderr", result.stderr.data)
+        prepared.store.write_yaml(
+            f"phase-a/checks/{stem}.yaml",
+            {
+                "schema_version": 1,
+                "check_id": f"phase-a-{stem}",
+                "kind": kind,
+                "command_id": command_id,
+                "argv": list(argv),
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "status": "passed" if result.exit_code == 0 and not result.timed_out else "failed",
+                "stdout": {
+                    "total_bytes": result.stdout.total_bytes,
+                    "truncated": result.stdout.truncated,
+                },
+                "stderr": {
+                    "total_bytes": result.stderr.total_bytes,
+                    "truncated": result.stderr.truncated,
+                },
+            },
+        )
+        if result.timed_out:
+            raise MendRuneError(f"{kind} timed out", reason_code="command_timed_out")
+        if result.exit_code != 0:
+            reasons = {
+                "build": "build_failed",
+                "regression": "regression_failed",
+                "oracle": "candidate_oracle_invalid",
+                "scanner": "scanner_failed",
+            }
+            raise MendRuneError(f"{kind} exited unsuccessfully", reason_code=reasons[kind])
+        return result, output
+    finally:
+        try:
+            prepared.baseline.verify_integrity(snapshot, config.execution.allowed_generated_paths)
+        except Exception as integrity_error:
+            if result is not None:
+                prepared.store.write_yaml(
+                    f"phase-a/checks/{stem}-integrity.yaml",
+                    {
+                        "schema_version": 1,
+                        "check_id": f"phase-a-{stem}-integrity",
+                        "status": "failed",
+                        "reason_code": "actual_diff_mismatch",
+                    },
+                )
+            raise integrity_error
+        else:
+            prepared.store.write_yaml(
+                f"phase-a/checks/{stem}-integrity.yaml",
+                {"schema_version": 1, "check_id": f"phase-a-{stem}-integrity", "status": "passed"},
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _container_output_path(output: Path, container_root: str, container_path: str) -> Path:
+    relative = PurePosixPath(container_path).relative_to(PurePosixPath(container_root))
+    return output.joinpath(*relative.parts)
+
+
+def _finding_record(finding: Finding) -> dict[str, object]:
+    return {
+        "scanner_id": finding.scanner_id,
+        "rule_id": finding.rule_id,
+        "severity": finding.severity,
+        "path": finding.path.as_posix(),
+        "line": finding.line,
+        "fingerprint": finding.fingerprint,
+        "message": finding.message,
+    }
 
 
 def prepare_preflight(campaign_path: Path, *, run_id: str | None = None) -> PreflightRun:

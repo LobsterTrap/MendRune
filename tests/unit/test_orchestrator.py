@@ -1,11 +1,13 @@
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import yaml
 
 from mendrune.errors import MendRuneError
-from mendrune.orchestrator import prepare_preflight
+from mendrune.executor import CapturedOutput, ExecutionResult
+from mendrune.orchestrator import execute_phase_a, prepare_preflight
 from tests.integration.test_verify_cli import create_campaign
 
 
@@ -45,6 +47,86 @@ def test_preflight_captures_frozen_inputs_and_creates_clean_baseline(
     prepared.close()
     assert not baseline_path.exists()
     assert not workspace_parent.exists()
+
+
+def _result(invocation, *, exit_code: int = 0) -> ExecutionResult:
+    empty = CapturedOutput(b"", 0, False)
+    return ExecutionResult(
+        invocation.argv,
+        exit_code,
+        False,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        1,
+        "container",
+        invocation.image,
+        "crun-krun",
+        empty,
+        empty,
+    )
+
+
+def test_phase_a_executes_schedule_and_persists_normalized_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+    calls = []
+
+    def execute(config, invocation):
+        calls.append(invocation)
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: true\nobservation: reproduced\n"
+            )
+        elif len(calls) == 4:
+            (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
+        return _result(invocation)
+
+    assert execute_phase_a(prepared, execute=execute) == ()
+    assert [call.argv for call in calls] == [
+        ("python", "-m", "build"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+    ]
+    assert len(list((prepared.store.path / "phase-a/checks").glob("*.yaml"))) == 8
+    assert (
+        yaml.safe_load(next((prepared.store.path / "phase-a/oracles").glob("*.yaml")).read_text())[
+            "vulnerable"
+        ]
+        is True
+    )
+    assert (
+        yaml.safe_load(next((prepared.store.path / "phase-a/scans").glob("*.yaml")).read_text())[
+            "findings"
+        ]
+        == []
+    )
+    prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_phase_a_mutation_fails_closed_and_persists_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+
+    def mutate(config, invocation):
+        (prepared.baseline.path / "file.txt").write_text("mutated\n")
+        return _result(invocation)
+
+    with pytest.raises(MendRuneError) as raised:
+        execute_phase_a(prepared, execute=mutate)
+
+    assert raised.value.reason_code == "actual_diff_mismatch"
+    assert (
+        yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"]
+        == "baseline_failure"
+    )
+    failure = yaml.safe_load((prepared.store.path / "phase-a/failure.yaml").read_text())
+    assert failure["reason_code"] == "actual_diff_mismatch"
+    prepared.close()
 
 
 def test_adaptation_disabled_never_invokes_goose(
