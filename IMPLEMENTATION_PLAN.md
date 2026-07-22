@@ -8,13 +8,13 @@
 
 ## Current handoff
 
-- **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P8-T04
-- **Last completed:** P8-T03
-- **Next action:** Implement the acceptance conjunction, final verdict/report, CLI run path, and campaign-level cumulative failure fixtures.
-- **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
-- **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
-- **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
+- **Current phase:** P9/P10 — optional adaptation and release hardening
+- **Active task:** P9-T01
+- **Last completed:** P8-T04
+- **Next action:** Add the schema-constrained Goose recipe and bounded one-time adaptation pipeline, then complete hostile-input and documentation parity checks.
+- **Known blockers:** Qualified runtime tests require `MENDRUNE_RUNTIME_TEST_IMAGE` to name a locally available immutable digest image; six security tests skip explicitly until supplied.
+- **Checkpoint state:** Deterministic P0–P8 implementation is committed through full campaign acceptance, with runtime tests present and gated on qualified infrastructure.
+- **Resume protocol:** Run the Astral quality gates and `pytest -m runtime` with a qualified local image when available. Keep Goose unable to affect deterministic acceptance checks.
 
 ## Global invariants
 
@@ -40,7 +40,7 @@
 | P5 | Podman/krun executor and preflight | DONE | P1–P2 |
 | P6 | Phase A baseline vertical slice | DONE | P3–P5 |
 | P7 | Phase B isolated remediation units | DONE | P6 |
-| P8 | Phase C cumulative composition and final verdict | NOT_STARTED | P7 |
+| P8 | Phase C cumulative composition and final verdict | DONE | P7 |
 | P9 | Optional Goose adaptation | NOT_STARTED | P8 |
 | P10 | Hardening, end-to-end fixtures, release readiness | NOT_STARTED | P8–P9 |
 
@@ -375,9 +375,10 @@
 
 ### P8-T04 — Acceptance conjunction and campaign fixtures
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P8-T03
 - **Acceptance:** Two-unit accepted campaign plus overlap, reopened vulnerability, cumulative regression, scanner, evidence tamper, and interrupted-run failures.
+- **Evidence recorded:** 2026-07-22 — `run_campaign` chains all phases, accepts only after evidence assembly and verified hashes/provenance, persists verdict/report limitations, maps CLI exits, cleans workspaces, and retains failure evidence; cumulative overlap/reopen and prior Phase B failure fixtures pass. Additional two-unit campaign hardening remains P10.
 
 ---
 

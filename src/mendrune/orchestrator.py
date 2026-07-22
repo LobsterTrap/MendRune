@@ -26,6 +26,7 @@ from mendrune.regression import (
     select_shared_regressions,
     select_unit_regressions,
 )
+from mendrune.reporting import LIMITATIONS
 from mendrune.repository import TreeSnapshot, Worktree
 from mendrune.runstore import RunStore
 from mendrune.scanner import Finding, compare_findings, normalize_semgrep_json
@@ -1308,6 +1309,177 @@ def _finding_record(finding: Finding) -> dict[str, object]:
         "fingerprint": finding.fingerprint,
         "message": finding.message,
     }
+
+
+def run_campaign(
+    campaign_path: Path,
+    *,
+    run_id: str | None = None,
+    execute: Executor = executor.execute,
+) -> dict[str, object]:
+    """Execute the complete campaign and return its persisted accepted verdict."""
+    prepared: PreflightRun | None = None
+    try:
+        prepared = prepare_preflight(campaign_path, run_id=run_id)
+        phase_a = execute_phase_a(prepared, execute=execute)
+        execute_phase_b(prepared, phase_a, execute=execute)
+        execute_phase_c(prepared, phase_a, execute=execute)
+        # Cleanup is acceptance-relevant: an uncertain workspace must never be accepted.
+        prepared.close()
+        return _accept_campaign(prepared)
+    except Exception:
+        if prepared is not None:
+            if not prepared._closed:
+                try:
+                    prepared.close()
+                except Exception as cleanup_error:
+                    exc = cleanup_error
+            _persist_terminal_failure(prepared, exc)
+        if isinstance(exc, MendRuneError):
+            raise
+        raise MendRuneError(
+            "unexpected campaign failure", reason_code="unexpected_exception"
+        ) from exc
+
+
+def _accept_campaign(prepared: PreflightRun) -> dict[str, object]:
+    """Evaluate the fail-closed acceptance conjunction from assembled evidence."""
+    store = prepared.store
+    try:
+        run = yaml.safe_load(store.artifact("run.yaml").path.read_text(encoding="utf-8"))
+        if not isinstance(run, dict) or run.get("state") != RunState.ASSEMBLING_EVIDENCE.value:
+            raise MendRuneError(
+                "acceptance requires assembled evidence", reason_code="required_check_missing"
+            )
+        store.verify_hash_manifest()
+        _verify_final_evidence(prepared)
+
+        series = yaml.safe_load(
+            store.artifact("final/supplied-series.yaml").path.read_text(encoding="utf-8")
+        )
+        if not isinstance(series, dict) or not isinstance(series.get("combined_diff"), dict):
+            raise MendRuneError(
+                "final provenance is incomplete", reason_code="provenance_incomplete"
+            )
+        combined = store.artifact("final/combined.diff")
+        if (
+            series["combined_diff"].get("path") != "combined.diff"
+            or series["combined_diff"].get("sha256") != combined.sha256
+        ):
+            raise MendRuneError(
+                "final combined diff does not match", reason_code="combined_diff_mismatch"
+            )
+
+        patches = series.get("patches")
+        if not isinstance(patches, list) or len(patches) != len(prepared.patches):
+            raise MendRuneError(
+                "patch provenance is incomplete", reason_code="provenance_incomplete"
+            )
+        for item in patches:
+            if not isinstance(item, dict):
+                raise MendRuneError(
+                    "patch provenance is incomplete", reason_code="provenance_incomplete"
+                )
+            for path_key, hash_key in (
+                ("supplied_path", "supplied_sha256"),
+                ("effective_path", "effective_sha256"),
+            ):
+                path = item.get(path_key)
+                digest = item.get(hash_key)
+                if not isinstance(path, str) or not isinstance(digest, str):
+                    raise MendRuneError(
+                        "patch provenance is incomplete", reason_code="provenance_incomplete"
+                    )
+                if store.artifact(path).sha256 != digest:
+                    raise MendRuneError(
+                        "patch provenance hash does not match", reason_code="provenance_incomplete"
+                    )
+
+        verdict: dict[str, object] = {
+            "schema_version": 1,
+            "run_id": store.run_id,
+            "outcome": "accepted",
+            "reason_code": "all_required_checks_passed",
+            "base_commit": prepared.verified.repository.base_commit,
+            "units_verified": list(prepared.verified.config.composition.order),
+            "limitations": list(LIMITATIONS),
+        }
+        store.write_yaml("final/verdict.yaml", verdict)
+        store.write_yaml(
+            "final/report.yaml",
+            {
+                "schema_version": 1,
+                "run_id": store.run_id,
+                "outcome": "accepted",
+                "reason_code": "all_required_checks_passed",
+                "verdict": verdict,
+                "limitations": list(LIMITATIONS),
+            },
+        )
+        _advance(store, prepared.verified, RunState.ASSEMBLING_EVIDENCE, RunState.ACCEPTED)
+        accepted = yaml.safe_load(store.artifact("run.yaml").path.read_text(encoding="utf-8"))
+        accepted["outcome"] = "accepted"
+        accepted["reason_code"] = "all_required_checks_passed"
+        store.write_yaml("run.yaml", accepted)
+        store.write_hash_manifest()
+        store.verify_hash_manifest()
+        return verdict
+    except Exception as exc:
+        reason = exc.reason_code if isinstance(exc, MendRuneError) else "provenance_incomplete"
+        # Acceptance failures are evidence failures and cannot leave a partial verdict.
+        (store.path / "final/verdict.yaml").unlink(missing_ok=True)
+        (store.path / "final/report.yaml").unlink(missing_ok=True)
+        _persist_failure_record(prepared, RunState.EVIDENCE_FAILURE, reason)
+        store.write_hash_manifest()
+        if isinstance(exc, MendRuneError):
+            raise
+        raise MendRuneError("acceptance evidence is invalid", reason_code=reason) from exc
+
+
+def _persist_terminal_failure(prepared: PreflightRun, exc: Exception) -> None:
+    reason = exc.reason_code if isinstance(exc, MendRuneError) else "unexpected_exception"
+    infrastructure = {
+        "rootless_required",
+        "podman_unavailable",
+        "runtime_unavailable",
+        "runtime_unqualified",
+        "image_digest_mismatch",
+        "isolation_control_unavailable",
+        "container_launch_failed",
+        "cleanup_uncertain",
+    }
+    internal = {
+        "illegal_state_transition",
+        "unexpected_exception",
+        "unexpected_internal_error",
+        "atomic_write_failed",
+    }
+    current = yaml.safe_load(prepared.store.artifact("run.yaml").path.read_text(encoding="utf-8"))
+    state_value = current.get("state") if isinstance(current, dict) else None
+    terminal = {state.value for state in RunState if state.value.endswith("failure")} | {
+        RunState.CONFIGURATION_ERROR.value,
+        RunState.AMBIGUOUS_OVERLAP.value,
+        RunState.INFRASTRUCTURE_ERROR.value,
+        RunState.INTERNAL_ERROR.value,
+    }
+    if state_value in terminal:
+        target = RunState(state_value)
+    elif reason in infrastructure:
+        target = RunState.INFRASTRUCTURE_ERROR
+    elif reason in internal:
+        target = RunState.INTERNAL_ERROR
+    else:
+        target = RunState.EVIDENCE_FAILURE
+    _persist_failure_record(prepared, target, reason)
+    prepared.store.write_hash_manifest()
+
+
+def _persist_failure_record(prepared: PreflightRun, state: RunState, reason: str) -> None:
+    _persist_state(prepared.store, prepared.verified, state)
+    document = yaml.safe_load(prepared.store.artifact("run.yaml").path.read_text(encoding="utf-8"))
+    document["outcome"] = state.value
+    document["reason_code"] = reason
+    prepared.store.write_yaml("run.yaml", document)
 
 
 def prepare_preflight(campaign_path: Path, *, run_id: str | None = None) -> PreflightRun:

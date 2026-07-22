@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mendrune import __version__
 from mendrune.errors import ConfigurationError, ExitCode, MendRuneError
+from mendrune.orchestrator import run_campaign
 from mendrune.reporting import report, status
 from mendrune.verify import verify_campaign
 
@@ -63,6 +64,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"verified campaign {verified.config.campaign_id} "
             f"at base commit {verified.repository.base_commit}"
         )
+        return ExitCode.SUCCESS
+
+    if args.command == "run":
+        try:
+            verdict = run_campaign(Path(args.campaign))
+        except ConfigurationError as exc:
+            print(f"{exc.reason_code}: {exc}", file=sys.stderr)
+            return ExitCode.CONFIGURATION_ERROR
+        except MendRuneError as exc:
+            print(f"{exc.reason_code}: {exc}", file=sys.stderr)
+            infrastructure = {
+                "rootless_required",
+                "podman_unavailable",
+                "runtime_unavailable",
+                "runtime_unqualified",
+                "image_digest_mismatch",
+                "isolation_control_unavailable",
+                "container_launch_failed",
+                "cleanup_uncertain",
+            }
+            internal = {
+                "illegal_state_transition",
+                "unexpected_exception",
+                "unexpected_internal_error",
+                "atomic_write_failed",
+            }
+            if exc.reason_code in infrastructure:
+                return ExitCode.INFRASTRUCTURE_ERROR
+            if exc.reason_code in internal:
+                return ExitCode.INTERNAL_ERROR
+            return ExitCode.VERIFICATION_FAILURE
+        except Exception as exc:
+            print(f"unexpected_exception: {exc}", file=sys.stderr)
+            return ExitCode.INTERNAL_ERROR
+        print(f"accepted run {verdict['run_id']}")
         return ExitCode.SUCCESS
 
     if args.command in {"status", "report"}:

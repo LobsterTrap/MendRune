@@ -2,6 +2,7 @@ import yaml
 
 from mendrune import __version__
 from mendrune.cli import build_parser, main
+from mendrune.errors import ConfigurationError, MendRuneError
 from mendrune.runstore import RunStore
 
 
@@ -30,6 +31,27 @@ def test_status_and_report_read_stored_records(tmp_path, capsys) -> None:
 def test_status_fails_for_missing_record(tmp_path, capsys) -> None:
     assert main(["--runs-root", str(tmp_path), "status", "missing"]) == 2
     assert "artifact_missing" in capsys.readouterr().err
+
+
+def test_run_maps_outcomes_to_exit_categories(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("mendrune.cli.run_campaign", lambda path: {"run_id": "accepted-1"})
+    assert main(["run", "campaign.yaml"]) == 0
+    assert "accepted run accepted-1" in capsys.readouterr().out
+
+    cases = (
+        (ConfigurationError("bad", reason_code="invalid_campaign"), 2),
+        (MendRuneError("failed", reason_code="cumulative_build_failed"), 3),
+        (MendRuneError("infra", reason_code="container_launch_failed"), 4),
+        (MendRuneError("bug", reason_code="unexpected_exception"), 5),
+    )
+    for error, expected in cases:
+
+        def fail(path, error=error):
+            raise error
+
+        monkeypatch.setattr("mendrune.cli.run_campaign", fail)
+        assert main(["run", "campaign.yaml"]) == expected
+        assert error.reason_code in capsys.readouterr().err
 
 
 def test_version(capsys) -> None:

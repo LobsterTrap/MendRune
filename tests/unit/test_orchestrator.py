@@ -14,6 +14,7 @@ from mendrune.orchestrator import (
     execute_phase_b,
     execute_phase_c,
     prepare_preflight,
+    run_campaign,
 )
 from tests.integration.test_verify_cli import create_campaign
 
@@ -237,6 +238,72 @@ def test_phase_c_strict_preapply_and_accumulated_checks_use_one_worktree(
         == "assembling_evidence"
     )
     prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_run_campaign_accepts_only_after_full_conjunction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign, initial = _prepare(tmp_path, monkeypatch)
+    initial.close()
+    # The helper pre-created run-1; use a distinct full-run identifier.
+    calls = []
+
+    def execute(config, invocation):
+        calls.append(invocation)
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            # Phase A and cumulative preapply reproduce; all post-patch checks mitigate.
+            vulnerable = len(calls) in {3, 10}
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: "
+                f"{'true' if vulnerable else 'false'}\nobservation: checked\n"
+            )
+        elif invocation.argv == ("python", "/evidence/check.py"):
+            (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
+        return _result(invocation)
+
+    verdict = run_campaign(campaign, run_id="full-run", execute=execute)
+    runs_directory = Path(yaml.safe_load(campaign.read_text())["storage"]["runs_directory"])
+    run_root = runs_directory / "full-run"
+    run = yaml.safe_load((run_root / "run.yaml").read_text())
+    report = yaml.safe_load((run_root / "final/report.yaml").read_text())
+
+    assert verdict["outcome"] == "accepted"
+    assert verdict["limitations"]
+    assert run["state"] == run["outcome"] == "accepted"
+    assert run["reason_code"] == "all_required_checks_passed"
+    assert report["limitations"] == verdict["limitations"]
+    assert not (campaign.parent / "runs/.workspaces/full-run").exists()
+
+
+def test_acceptance_rejects_tampered_combined_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+    prepared.store.write_yaml(
+        "final/supplied-series.yaml",
+        {"combined_diff": {"path": "combined.diff", "sha256": "0"}, "patches": []},
+    )
+    (prepared.store.path / "final/combined.diff").parent.mkdir(exist_ok=True)
+    (prepared.store.path / "final/combined.diff").write_bytes(b"tampered")
+    prepared.store.write_yaml("final/scan-comparison.yaml", {"status": "passed"})
+    prepared.store.write_yaml("final/manifest.yaml", {})
+    from mendrune.orchestrator import _accept_campaign, _persist_state
+
+    _persist_state(
+        prepared.store,
+        prepared.verified,
+        __import__("mendrune.state", fromlist=["RunState"]).RunState.ASSEMBLING_EVIDENCE,
+    )
+    prepared.store.write_hash_manifest()
+
+    with pytest.raises(MendRuneError):
+        _accept_campaign(prepared)
+    run = yaml.safe_load((prepared.store.path / "run.yaml").read_text())
+    assert run["state"] == run["outcome"] == "evidence_failure"
+    assert not (prepared.store.path / "final/verdict.yaml").exists()
     prepared.close()
 
 
