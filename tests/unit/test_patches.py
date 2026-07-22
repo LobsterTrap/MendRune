@@ -4,7 +4,7 @@ import pytest
 
 from mendrune.errors import ConfigurationError
 from mendrune.models import PatchPolicyConfig
-from mendrune.patches import parse_patch
+from mendrune.patches import locate_hunks, parse_patch
 from tests.unit.test_models import campaign_data
 
 
@@ -22,6 +22,7 @@ def test_parses_text_patch() -> None:
     assert parsed.changed_lines == 2
     assert parsed.files[0].old_path is not None
     assert parsed.files[0].old_path.as_posix() == "src/a.py"
+    assert parsed.files[0].hunks[0].old_lines == (b"old",)
 
 
 @pytest.mark.parametrize(
@@ -47,6 +48,30 @@ def test_rejects_unsupported_patch(patch: bytes, reason: str) -> None:
     with pytest.raises(ConfigurationError) as raised:
         parse_patch(patch, policy())
     assert raised.value.reason_code == reason
+
+
+def test_locates_exact_context_relocation(tmp_path) -> None:
+    target = tmp_path / "src" / "a.py"
+    target.parent.mkdir()
+    target.write_bytes(b"prefix\nold\nsuffix\n")
+    parsed = parse_patch(b"--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n", policy())
+
+    placements = locate_hunks(tmp_path, parsed)
+
+    assert placements[0].original_start == 1
+    assert placements[0].applied_start == 2
+
+
+def test_rejects_ambiguous_context_relocation(tmp_path) -> None:
+    target = tmp_path / "src" / "a.py"
+    target.parent.mkdir()
+    target.write_bytes(b"prefix\nold\nold\n")
+    parsed = parse_patch(b"--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n", policy())
+
+    with pytest.raises(ConfigurationError) as raised:
+        locate_hunks(tmp_path, parsed)
+
+    assert raised.value.reason_code == "patch_check_failed"
 
 
 def test_rejects_patch_line_limit() -> None:

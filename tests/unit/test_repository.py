@@ -4,7 +4,9 @@ from pathlib import Path
 import pytest
 
 from mendrune.errors import ConfigurationError
+from mendrune.models import PatchPolicyConfig
 from mendrune.repository import Worktree, verify_repository
+from tests.unit.test_models import campaign_data
 
 
 def git(path: Path, *args: str) -> str:
@@ -80,6 +82,55 @@ def test_worktree_applies_patch_and_reports_diff(tmp_path: Path) -> None:
         assert (worktree.path / "file.txt").read_text() == "fixed\n"
         assert b"+fixed" in worktree.diff()
         assert worktree.status().startswith(" M file.txt")
+
+
+def test_worktree_records_exact_context_relocation(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    create_repository(repository_path)
+    repository = verify_repository(repository_path, "HEAD")
+    patch = tmp_path / "change.diff"
+    patch.write_bytes(b"--- a/file.txt\n+++ b/file.txt\n@@ -7 +7 @@\n-base\n+fixed\n")
+    policy_data = campaign_data()["patch_policy"]
+    policy_data["allowed_paths"] = ["file.txt"]
+    policy = PatchPolicyConfig.model_validate(policy_data)
+
+    with Worktree.create(repository, tmp_path / "scratch") as worktree:
+        placements = worktree.apply_patch(patch, policy)
+
+    assert placements[0].original_start == 7
+    assert placements[0].applied_start == 1
+
+
+def test_worktree_integrity_allows_only_declared_untracked_files(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    create_repository(repository_path)
+    repository = verify_repository(repository_path, "HEAD")
+
+    with Worktree.create(repository, tmp_path / "scratch") as worktree:
+        expected = worktree.snapshot()
+        generated = worktree.path / "build" / "output.txt"
+        generated.parent.mkdir()
+        generated.write_text("output\n")
+        worktree.verify_integrity(expected, ("build/**",))
+        (worktree.path / "file.txt").write_text("mutated\n")
+        with pytest.raises(ConfigurationError) as raised:
+            worktree.verify_integrity(expected, ("build/**",))
+
+    assert raised.value.reason_code == "actual_diff_mismatch"
+
+
+def test_worktree_integrity_rejects_unexpected_generated_file(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    create_repository(repository_path)
+    repository = verify_repository(repository_path, "HEAD")
+
+    with Worktree.create(repository, tmp_path / "scratch") as worktree:
+        expected = worktree.snapshot()
+        (worktree.path / "unexpected.txt").write_text("output\n")
+        with pytest.raises(ConfigurationError) as raised:
+            worktree.verify_integrity(expected, ("build/**",))
+
+    assert raised.value.reason_code == "actual_diff_mismatch"
 
 
 def test_verify_repository_rejects_unknown_ref(tmp_path: Path) -> None:

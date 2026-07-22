@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from mendrune.errors import ConfigurationError
+from mendrune.models import PatchPolicyConfig
+from mendrune.patches import HunkPlacement, locate_hunks, parse_patch
+from mendrune.policy import matches_path
 
 _GIT_ENV_REMOVE_PREFIXES = ("GIT_",)
+
+
+@dataclass(frozen=True)
+class TreeEntry:
+    path: PurePosixPath
+    mode: int
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class TreeSnapshot:
+    tracked: tuple[TreeEntry, ...]
 
 
 @dataclass(frozen=True)
@@ -74,9 +92,14 @@ class Worktree:
                 f"worktree cleanup failed: {result_error}", reason_code="cleanup_uncertain"
             ) from result_error
 
-    def apply_patch(self, patch: Path) -> None:
-        _git(self.path, "apply", "--check", "--whitespace=error-all", os.fspath(patch))
-        _git(self.path, "apply", "--whitespace=error-all", os.fspath(patch))
+    def apply_patch(
+        self, patch: Path, policy: PatchPolicyConfig | None = None
+    ) -> tuple[HunkPlacement, ...]:
+        data = patch.read_bytes()
+        placements = locate_hunks(self.path, parse_patch(data, policy)) if policy else ()
+        _apply(self.path, patch, check=True)
+        _apply(self.path, patch, check=False)
+        return placements
 
     def diff(self) -> bytes:
         return _git_bytes(
@@ -91,6 +114,55 @@ class Worktree:
 
     def status(self) -> str:
         return _git(self.path, "status", "--porcelain=v1", "--untracked-files=all")
+
+    def snapshot(self) -> TreeSnapshot:
+        entries: list[TreeEntry] = []
+        for raw_path in _git_bytes(self.path, "ls-files", "-z").split(b"\0"):
+            if not raw_path:
+                continue
+            path = PurePosixPath(raw_path.decode("utf-8", errors="strict"))
+            source = self.path.joinpath(*path.parts)
+            source_stat = source.lstat()
+            if not stat.S_ISREG(source_stat.st_mode) or source.is_symlink():
+                raise ConfigurationError(
+                    f"tracked path is not a regular file: {path}",
+                    reason_code="actual_diff_mismatch",
+                )
+            entries.append(
+                TreeEntry(
+                    path,
+                    stat.S_IMODE(source_stat.st_mode),
+                    source_stat.st_size,
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                )
+            )
+        return TreeSnapshot(tuple(entries))
+
+    def verify_integrity(
+        self, expected: TreeSnapshot, allowed_generated_paths: tuple[str, ...] = ()
+    ) -> None:
+        if self.snapshot() != expected:
+            raise ConfigurationError(
+                "tracked source tree changed unexpectedly", reason_code="actual_diff_mismatch"
+            )
+        for raw_path in _git_bytes(
+            self.path, "ls-files", "--others", "--exclude-standard", "-z"
+        ).split(b"\0"):
+            if not raw_path:
+                continue
+            path = PurePosixPath(raw_path.decode("utf-8", errors="strict"))
+            source = self.path.joinpath(*path.parts)
+            source_stat = source.lstat()
+            if (
+                source.is_symlink()
+                or not stat.S_ISREG(source_stat.st_mode)
+                or not any(
+                    matches_path(pattern, path.as_posix()) for pattern in allowed_generated_paths
+                )
+            ):
+                raise ConfigurationError(
+                    f"unexpected generated path: {path}", reason_code="actual_diff_mismatch"
+                )
 
     def __enter__(self) -> Worktree:
         return self
@@ -139,6 +211,18 @@ def verify_repository(path: Path, base_ref: str) -> VerifiedRepository:
         ) from exc
 
     return VerifiedRepository(path=resolved, git_common_dir=common_dir, base_commit=commit)
+
+
+def _apply(repository: Path, patch: Path, *, check: bool) -> None:
+    args = ["apply"]
+    if check:
+        args.append("--check")
+    args.extend(("--whitespace=error-all", os.fspath(patch)))
+    try:
+        _git(repository, *args)
+    except ConfigurationError as exc:
+        reason = "patch_check_failed" if check else "patch_apply_failed"
+        raise ConfigurationError(str(exc), reason_code=reason) from exc
 
 
 def _git(repository: Path, *args: str) -> str:

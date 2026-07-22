@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P3-T04
-- **Last completed:** P0-T04
-- **Next action:** Resume P3-T04 exact-context placement evidence, then complete source-integrity/generated-path accounting and executor lifecycle.
+- **Active task:** P5-T02
+- **Last completed:** P3-T05
+- **Next action:** Implement executor timeout/kill/remove with independently bounded stdout/stderr capture and cleanup evidence.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -218,16 +218,18 @@
 
 ### P3-T04 — Exact-context placement and Git application
 
-- **Status:** IN_PROGRESS
+- **Status:** DONE
 - **Owner/date:** goose / 2026-07-22
 - **Depends on:** P3-T02–P3-T03
 - **Deliverables:** Full-context unambiguous relocation algorithm; `git apply --check`; no reduced context/3-way/reject/partial; application-range evidence.
+- **Evidence recorded:** 2026-07-22 — parser retains full old-side hunk content; exact-header and unique relocation placement tests pass; ambiguous relocation fails closed; Git check/application returns original/applied ranges.
 
 ### P3-T05 — Actual diff and source-integrity accounting
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P3-T04
 - **Deliverables:** Expected patch-derived tree fingerprint; tracked content/type/mode immutability after commands; only untracked regular files under `allowed_generated_paths`; generated cleanup before combined diff.
+- **Evidence recorded:** 2026-07-22 — deterministic tracked snapshots record path/mode/size/SHA-256; tracked mutations and undeclared/special generated files fail; declared untracked regular outputs pass. Final cleanup integration remains with P8-T03.
 
 ---
 
@@ -273,7 +275,8 @@
 
 ### P5-T02 — Process lifecycle and bounded capture
 
-- **Status:** NOT_STARTED
+- **Status:** IN_PROGRESS
+- **Owner/date:** goose / 2026-07-22
 - **Depends on:** P5-T01, P2
 - **Deliverables:** Timeout, kill/remove, separate bounded stdout/stderr, truncation metadata, container metadata, cleanup uncertainty.
 
