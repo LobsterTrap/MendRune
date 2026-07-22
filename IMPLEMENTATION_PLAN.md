@@ -37,7 +37,7 @@
 | P2 | Safe storage, state machine, evidence capture | DONE | P1 |
 | P3 | Git worktrees, strict patches, tree integrity | DONE | P1–P2 |
 | P4 | Deterministic oracle, regressions, scanner logic | DONE | P1–P2 |
-| P5 | Podman/krun executor and preflight | IN_PROGRESS | P1–P2 |
+| P5 | Podman/krun executor and preflight | DONE | P1–P2 |
 | P6 | Phase A baseline vertical slice | NOT_STARTED | P3–P5 |
 | P7 | Phase B isolated remediation units | NOT_STARTED | P6 |
 | P8 | Phase C cumulative composition and final verdict | NOT_STARTED | P7 |
@@ -293,9 +293,10 @@
 
 ### P5-T04 — Runtime security tests
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P5-T03
 - **Deliverables:** Qualified-host tests for network, mounts, credentials, capabilities, limits, timeout cleanup. Explicit skips only for missing krun infrastructure.
+- **Evidence recorded:** 2026-07-22 — six qualified-host tests cover network denial, mount boundaries, absent credentials/sockets, capabilities/no-new-privileges/read-only root, cgroup limits, and timeout cleanup; all explicitly skipped on this host because `MENDRUNE_RUNTIME_TEST_IMAGE` is unset, while collection and static gates pass.
 
 ---
 

@@ -34,6 +34,9 @@ packages = ["src/mendrune"]
 addopts = "-ra"
 pythonpath = [".", "src"]
 testpaths = ["tests"]
+markers = [
+  "runtime: qualified-host rootless Podman/libkrun runtime security tests",
+]
 
 [tool.ruff]
 target-version = "py312"
