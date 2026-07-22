@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P5-T04/P6-T01
-- **Last completed:** P5-T03
-- **Next action:** Add qualified-host runtime security tests while integrating Phase A preflight and immutable capture orchestration.
+- **Active task:** P5-T04/P6-T02
+- **Last completed:** P6-T01
+- **Next action:** Add qualified-host runtime security tests and execute/persist Phase A build, regression, oracle, scan, and integrity checks.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -303,9 +303,10 @@
 
 ### P6-T01 — Orchestrate preflight and immutable input capture
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P2–P5
 - **Deliverables:** Validate, capture/hash evidence, freeze effective supplied patches, qualify executor, create baseline worktree.
+- **Evidence recorded:** 2026-07-22 — preflight orchestration captures immutable campaign/repository/evidence/patch provenance, freezes supplied patches, hashes the run, qualifies isolation before capture, creates a clean detached baseline, records failures, and cleans up; adaptation remains intentionally deferred to P9.
 
 ### P6-T02 — Execute baseline build/regressions/oracles/scans
 
