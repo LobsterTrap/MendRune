@@ -1327,19 +1327,22 @@ def run_campaign(
         # Cleanup is acceptance-relevant: an uncertain workspace must never be accepted.
         prepared.close()
         return _accept_campaign(prepared)
-    except Exception:
+    except Exception as exc:
+        failure: Exception = exc
         if prepared is not None:
             if not prepared._closed:
                 try:
                     prepared.close()
                 except Exception as cleanup_error:
-                    exc = cleanup_error
-            _persist_terminal_failure(prepared, exc)
-        if isinstance(exc, MendRuneError):
+                    failure = cleanup_error
+            _persist_terminal_failure(prepared, failure)
+        if failure is exc and isinstance(exc, MendRuneError):
             raise
+        if isinstance(failure, MendRuneError):
+            raise failure from exc
         raise MendRuneError(
             "unexpected campaign failure", reason_code="unexpected_exception"
-        ) from exc
+        ) from failure
 
 
 def _accept_campaign(prepared: PreflightRun) -> dict[str, object]:
