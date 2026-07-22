@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mendrune.errors import MendRuneError
@@ -63,9 +65,11 @@ def derive_fingerprint(
 
 
 def normalize_semgrep_json(
-    output: bytes | str, severity_order: tuple[str, ...]
+    output: bytes | str, scanner_id: str, severity_order: tuple[str, ...]
 ) -> tuple[Finding, ...]:
     """Strictly adapt Semgrep's native JSON output to canonical findings."""
+    if not scanner_id:
+        raise MendRuneError("scanner ID is required", reason_code="scanner_output_invalid")
     try:
         document: Any = json.loads(output)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -89,8 +93,76 @@ def normalize_semgrep_json(
             "Semgrep output reports errors or has an invalid schema",
             reason_code="scanner_output_invalid",
         )
-    findings = [_semgrep_finding(result) for result in results]
+    findings = [_semgrep_finding(result, scanner_id) for result in results]
     return normalize_findings(findings, severity_order)
+
+
+def read_scanner_output(output_root: Path, output_path: Path, maximum_bytes: int) -> bytes:
+    """Read one confined, regular scanner output without following links."""
+    try:
+        relative = output_path.relative_to(output_root)
+        if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise ValueError
+        root_fd = os.open(output_root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            parent_fd = root_fd
+            opened: list[int] = []
+            for part in relative.parts[:-1]:
+                parent_fd = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+                )
+                opened.append(parent_fd)
+            fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            try:
+                metadata = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_size > maximum_bytes
+                ):
+                    raise ValueError
+                chunks: list[bytes] = []
+                remaining = maximum_bytes + 1
+                while remaining:
+                    chunk = os.read(fd, remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data = b"".join(chunks)
+                current = os.fstat(fd)
+                stable = (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_mode,
+                    metadata.st_nlink,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                )
+                after = (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_mode,
+                    current.st_nlink,
+                    current.st_size,
+                    current.st_mtime_ns,
+                    current.st_ctime_ns,
+                )
+                if len(data) > maximum_bytes or after != stable:
+                    raise ValueError
+                return data
+            finally:
+                os.close(fd)
+        finally:
+            for opened_fd in reversed(opened):
+                os.close(opened_fd)
+            os.close(root_fd)
+    except (OSError, ValueError) as exc:
+        raise MendRuneError(
+            "scanner output is unsafe or exceeds the configured byte cap",
+            reason_code="scanner_output_invalid",
+        ) from exc
 
 
 def normalize_findings(
@@ -138,7 +210,7 @@ def compare_findings(
     )
 
 
-def _semgrep_finding(value: Any) -> Finding:
+def _semgrep_finding(value: Any, scanner_id: str) -> Finding:
     if not isinstance(value, dict) or set(value) != {"check_id", "path", "start", "end", "extra"}:
         raise MendRuneError(
             "Semgrep result has an invalid schema", reason_code="scanner_output_invalid"
@@ -182,7 +254,7 @@ def _semgrep_finding(value: Any) -> Finding:
             "Semgrep result has invalid severity or path", reason_code="scanner_output_invalid"
         )
     return Finding(
-        "semgrep",
+        scanner_id,
         check_id,
         severity,
         path,

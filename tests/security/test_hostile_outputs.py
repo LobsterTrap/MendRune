@@ -152,7 +152,7 @@ def test_prompt_injection_text_is_preserved_as_inert_scanner_data(tmp_path: Path
         "paths": {},
     }
 
-    findings = normalize_semgrep_json(json.dumps(document), ORDER)
+    findings = normalize_semgrep_json(json.dumps(document), "configured", ORDER)
 
     assert findings[0].message == injection
     assert findings[0].rule_id == "hostile.prompt"

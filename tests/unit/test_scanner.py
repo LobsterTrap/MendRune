@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import PurePosixPath
 
 import pytest
@@ -10,6 +11,7 @@ from mendrune.scanner import (
     derive_fingerprint,
     normalize_findings,
     normalize_semgrep_json,
+    read_scanner_output,
 )
 
 ORDER = ("info", "low", "medium", "high", "critical")
@@ -53,12 +55,14 @@ def test_semgrep_adapter_produces_deterministic_canonical_findings() -> None:
     low = semgrep_result(severity="INFO", fingerprint="z")
     duplicate = semgrep_result(severity="ERROR", fingerprint="z")
     first = semgrep_result(path="src/z.py", fingerprint="a")
-    normalized = normalize_semgrep_json(semgrep_output([low, duplicate, first]), ORDER)
+    normalized = normalize_semgrep_json(
+        semgrep_output([low, duplicate, first]), "configured", ORDER
+    )
     assert [(item.fingerprint, item.severity, item.path.as_posix()) for item in normalized] == [
         ("a", "medium", "src/z.py"),
         ("z", "high", "src/a.py"),
     ]
-    assert normalized[0].scanner_id == "semgrep"
+    assert normalized[0].scanner_id == "configured"
     assert normalized[0].rule_id == "python.security.rule"
     assert normalized[0].line == 12
 
@@ -66,7 +70,7 @@ def test_semgrep_adapter_produces_deterministic_canonical_findings() -> None:
 @pytest.mark.parametrize("output", [b"not JSON", "[]", '{"results": [], "errors": []}'])
 def test_semgrep_adapter_rejects_malformed_output(output: bytes | str) -> None:
     with pytest.raises(MendRuneError, match="Semgrep output") as error:
-        normalize_semgrep_json(output, ORDER)
+        normalize_semgrep_json(output, "configured", ORDER)
     assert error.value.reason_code == "scanner_output_invalid"
 
 
@@ -83,7 +87,7 @@ def test_semgrep_adapter_rejects_invalid_path_or_severity(field: str, value: str
     else:
         result[field] = value
     with pytest.raises(MendRuneError, match="invalid severity or path") as error:
-        normalize_semgrep_json(semgrep_output([result]), ORDER)
+        normalize_semgrep_json(semgrep_output([result]), "configured", ORDER)
     assert error.value.reason_code == "scanner_output_invalid"
 
 
@@ -97,11 +101,49 @@ def test_semgrep_adapter_rejects_reported_errors_and_result_schema() -> None:
         }
     )
     with pytest.raises(MendRuneError, match="reports errors"):
-        normalize_semgrep_json(reported_error, ORDER)
+        normalize_semgrep_json(reported_error, "configured", ORDER)
     result = semgrep_result()
     del result["end"]
     with pytest.raises(MendRuneError, match="invalid schema"):
-        normalize_semgrep_json(semgrep_output([result]), ORDER)
+        normalize_semgrep_json(semgrep_output([result]), "configured", ORDER)
+
+
+def test_semgrep_adapter_preserves_configured_scanner_identity() -> None:
+    output = semgrep_output([semgrep_result()])
+    first = normalize_semgrep_json(output, "first", ORDER)
+    second = normalize_semgrep_json(output, "second", ORDER)
+    combined = normalize_findings([*first, *second], ORDER)
+    assert [item.scanner_id for item in combined] == ["first", "second"]
+
+
+def test_scanner_output_reader_rejects_links_and_oversize(tmp_path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_bytes(b"{}")
+    assert read_scanner_output(output, result, 2) == b"{}"
+
+    result.unlink()
+    target = tmp_path / "target"
+    target.write_bytes(b"{}")
+    result.symlink_to(target)
+    with pytest.raises(MendRuneError, match="unsafe"):
+        read_scanner_output(output, result, 2)
+
+    result.unlink()
+    result.write_bytes(b"too large")
+    with pytest.raises(MendRuneError, match="byte cap"):
+        read_scanner_output(output, result, 2)
+
+
+def test_scanner_output_reader_rejects_hard_links(tmp_path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_bytes(b"{}")
+    os.link(result, output / "second.json")
+    with pytest.raises(MendRuneError, match="unsafe"):
+        read_scanner_output(output, result, 2)
 
 
 def test_fingerprint_is_stable() -> None:
