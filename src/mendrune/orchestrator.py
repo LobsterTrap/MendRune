@@ -1121,6 +1121,12 @@ def _verify_final_evidence(prepared: PreflightRun) -> None:
         unit = units[unit_id]
         root = f"phase-b/{unit_id}"
         manifests.append(f"{root}/manifest.yaml")
+        for patch_sequence, patch in enumerate(unit.patches, 1):
+            expected[f"{root}/patches/{patch_sequence:04d}-{patch.id}.yaml"] = {
+                "schema_version": 1,
+                "patch_id": patch.id,
+            }
+            expected[f"{root}/diffs/{patch_sequence:04d}-{patch.id}.diff"] = {}
         sequence = len(unit.patches) + 1
         command(root, sequence, "build", "build")
         for vulnerability in unit.vulnerabilities:
@@ -1152,6 +1158,12 @@ def _verify_final_evidence(prepared: PreflightRun) -> None:
                 f"{root}/oracles/{sequence:04d}-preapply-{vulnerability.id}.yaml",
                 f"phase-c-{stage:04d}-preapply-{vulnerability.id}",
             )
+        for patch_sequence, patch in enumerate(unit.patches, sequence + 1):
+            expected[f"{root}/patches/{patch_sequence:04d}-{patch.id}.yaml"] = {
+                "schema_version": 1,
+                "patch_id": patch.id,
+            }
+            expected[f"{root}/diffs/{patch_sequence:04d}-{patch.id}.diff"] = {}
         sequence += len(unit.patches) + 1
         command(root, sequence, "build", "build")
         applied.append(unit_id)
@@ -1217,13 +1229,26 @@ def _verify_final_evidence(prepared: PreflightRun) -> None:
             prepared.store.artifact(relative)
         actual = {
             path.relative_to(prepared.store.path).as_posix()
-            for pattern in ("**/checks/*.yaml", "**/oracles/*.yaml", "**/scans/*.yaml")
+            for pattern in (
+                "**/checks/*.yaml",
+                "**/oracles/*.yaml",
+                "**/scans/*.yaml",
+                "phase-b/*/patches/*.yaml",
+                "phase-b/*/diffs/*.diff",
+                "phase-c/stages/*/patches/*.yaml",
+                "phase-c/stages/*/diffs/*.diff",
+            )
             for path in prepared.store.path.glob(pattern)
         }
         if actual != set(expected):
             raise ValueError("evidence record set differs from frozen schedule")
         for relative, mapping in expected.items():
-            document = yaml.safe_load((prepared.store.path / relative).read_text())
+            artifact = prepared.store.artifact(relative)
+            if not mapping:
+                if artifact.size == 0:
+                    raise ValueError(f"empty required diff: {relative}")
+                continue
+            document = yaml.safe_load(artifact.path.read_text())
             if not isinstance(document, dict) or any(
                 document.get(k) != v for k, v in mapping.items()
             ):
@@ -1777,6 +1802,7 @@ def _capture_patches(store: RunStore, verified: VerifiedCampaign) -> tuple[Froze
     patch_config = {
         (unit.id, patch.id): patch for unit in verified.config.units for patch in unit.patches
     }
+    effective_changed_lines = 0
     for patch in verified.patches:
         configured = patch_config[(patch.unit_id, patch.patch_id)]
         sequence = sequence_by_unit.get(patch.unit_id, 0) + 1
@@ -1786,18 +1812,28 @@ def _capture_patches(store: RunStore, verified: VerifiedCampaign) -> tuple[Froze
         destination = store.path.joinpath(*relative.parts)
         _write_bytes_atomic(destination, data)
         if configured.adapt_with_goose:
-            frozen.append(_capture_adaptation(store, verified, patch, relative, data))
+            captured = _capture_adaptation(store, verified, patch, relative, data)
         else:
-            frozen.append(
-                FrozenPatch(
-                    unit_id=patch.unit_id,
-                    patch_id=patch.patch_id,
-                    supplied_path=relative,
-                    supplied_sha256=patch.sha256,
-                    effective_path=relative,
-                    effective_sha256=patch.sha256,
-                )
+            captured = FrozenPatch(
+                unit_id=patch.unit_id,
+                patch_id=patch.patch_id,
+                supplied_path=relative,
+                supplied_sha256=patch.sha256,
+                effective_path=relative,
+                effective_sha256=patch.sha256,
             )
+        effective = store.path.joinpath(*captured.effective_path.parts).read_bytes()
+        effective_changed_lines += parse_patch(
+            effective, verified.config.patch_policy
+        ).changed_lines
+        if effective_changed_lines > verified.config.patch_policy.max_changed_lines_campaign:
+            raise MendRuneError(
+                "effective patch series exceeds campaign line budget",
+                reason_code="goose_adaptation_failed"
+                if configured.adapt_with_goose
+                else "patch_policy_violation",
+            )
+        frozen.append(captured)
         destination.chmod(0o400)
     return tuple(frozen)
 

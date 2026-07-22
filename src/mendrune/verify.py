@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -85,8 +86,13 @@ def verify_campaign(path: Path) -> VerifiedCampaign:
     if config.goose.enabled:
         assert config.goose.recipe is not None
         recipe = _regular_file(campaign_root, config.goose.recipe, "Goose recipe")
-        recipe_sha256 = hashlib.sha256(recipe.read_bytes()).hexdigest()
-        validate_recipe(recipe, timeout_seconds=config.goose.timeout_seconds)
+        recipe_bytes = recipe.read_bytes()
+        recipe_sha256 = hashlib.sha256(recipe_bytes).hexdigest()
+        with tempfile.TemporaryDirectory(prefix="mendrune-recipe-") as temporary:
+            frozen_recipe = Path(temporary) / "adapt-patch.yaml"
+            frozen_recipe.write_bytes(recipe_bytes)
+            frozen_recipe.chmod(0o400)
+            validate_recipe(frozen_recipe, timeout_seconds=config.goose.timeout_seconds)
 
     runs_directory = _resolve_config_path(campaign_root, config.storage.runs_directory)
     if _is_beneath(repository.path, runs_directory):
