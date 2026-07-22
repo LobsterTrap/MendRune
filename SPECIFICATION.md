@@ -5,6 +5,7 @@
 - **Primary implementation language:** Python 3
 - **Persistent data format:** YAML and native text artifacts
 - **License:** MIT
+- **Required Python tooling:** Astral uv, Ruff, and ty
 
 The terms **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** define implementation requirements. Nothing in this document claims that the described MendRune commands are currently implemented.
 
@@ -69,6 +70,19 @@ V1 MUST NOT provide:
 - a database, daemon, API, queue, dashboard, or distributed workers; or
 - proof of complete security or regression freedom.
 
+### 2.4 Python development toolchain
+
+The project MUST use the Astral Python toolchain consistently:
+
+- **uv** MUST manage interpreter selection, the development environment, dependencies, the lockfile, package installation, and execution of project commands. `uv.lock` MUST be version controlled. Contributors and automation MUST NOT use direct `pip install` commands for the project environment.
+- **Ruff** MUST be the formatter and linter. Formatting and lint checks MUST run through `uv run ruff` using the committed `pyproject.toml` configuration.
+- **ty** MUST be the static type checker. Type checks MUST run through `uv run ty check` using committed project configuration.
+- Tests MUST run through `uv run pytest`. The documented quality gate is `uv run ruff format --check .`, `uv run ruff check .`, `uv run ty check`, and `uv run pytest`.
+- CI and release verification MUST use `uv sync --locked --group dev` (or the installed uv version's equivalent locked synchronization) before running quality gates.
+- Alternative local editor integrations MAY be used, but they MUST NOT replace or weaken these required gates.
+
+The build backend MAY remain Hatchling; uv is the required frontend and environment/dependency manager.
+
 ## 3. Trust and architectural invariants
 
 Operator configuration is trusted policy but MUST be validated. Repositories, Git metadata, patches, PoCs, tests, scanners and their output, logs, documentation, and Goose output are untrusted data.
@@ -98,6 +112,7 @@ MendRune/
 ├── SPECIFICATION.md
 ├── LICENSE
 ├── pyproject.toml
+├── uv.lock
 ├── src/mendrune/
 │   ├── __init__.py
 │   ├── __main__.py
@@ -158,11 +173,13 @@ units:
       - id: CVE-2026-1001
         oracle:
           argv: [python, /evidence/oracles/cve-2026-1001.py]
+          evidence_paths: [oracles/cve-2026-1001.py, fixtures/parser-crash.bin]
           result_file: /output/oracle-result.yaml
           timeout_seconds: 60
       - id: CVE-2026-1002
         oracle:
           argv: [python, /evidence/oracles/cve-2026-1002.py]
+          evidence_paths: [oracles/cve-2026-1002.py]
           result_file: /output/oracle-result.yaml
           timeout_seconds: 60
     patches:
@@ -176,7 +193,8 @@ units:
         adapt_with_goose: false
     regressions:
       - id: parser-tests
-        argv: [python, -m, pytest, tests/parser]
+        argv: [python, /evidence/regressions/parser-tests.py]
+        evidence_paths: [regressions/parser-tests.py, fixtures/parser/]
         timeout_seconds: 300
 
   - id: auth-fix
@@ -184,6 +202,7 @@ units:
       - id: CVE-2026-1003
         oracle:
           argv: [python, /evidence/oracles/cve-2026-1003.py]
+          evidence_paths: [oracles/cve-2026-1003.py]
           result_file: /output/oracle-result.yaml
           timeout_seconds: 60
     patches:
@@ -193,7 +212,8 @@ units:
         adapt_with_goose: false
     regressions:
       - id: auth-tests
-        argv: [python, -m, pytest, tests/auth]
+        argv: [python, /evidence/regressions/auth-tests.py]
+        evidence_paths: [regressions/auth-tests.py]
         timeout_seconds: 300
 
 commands:
@@ -202,11 +222,13 @@ commands:
     timeout_seconds: 300
   shared_regressions:
     - id: unit-tests
-      argv: [python, -m, pytest, tests/unit]
+      argv: [python, /evidence/regressions/unit-tests.py]
+      evidence_paths: [regressions/unit-tests.py]
       timeout_seconds: 300
   scans:
     - id: semgrep
-      argv: [semgrep, --config, /evidence/rules, --json, --output, /output/semgrep.json, /workspace]
+      argv: [semgrep, --config, /evidence/rules/semgrep.yaml, --json, --output, /output/semgrep.json, /workspace]
+      evidence_paths: [rules/semgrep.yaml]
       timeout_seconds: 300
       required: true
       raw_output: /output/semgrep.json
@@ -222,6 +244,10 @@ execution:
   memory_mib: 2048
   pids_limit: 256
   maximum_output_bytes: 1048576
+  allowed_generated_paths:
+    - build/**
+    - dist/**
+    - .pytest_cache/**
   environment:
     LANG: C.UTF-8
     LC_ALL: C.UTF-8
@@ -278,11 +304,16 @@ The implementation MUST enforce at least the following:
 - `goose.enabled` defaults to `false`. `adapt_with_goose` defaults to `false` and is invalid when `goose.enabled` is false.
 - Every command is a nonempty sequence of nonempty argument strings; shell strings are invalid.
 - Build, oracle, shared regression, and unit regression checks are always required in v1; their definitions MUST NOT accept a `required: false` override. Scanner definitions MUST declare `required: true`; optional scanners are out of scope.
+- Every oracle, regression, and scanner command has a nonempty `evidence_paths` list. Paths are relative to `mounts.evidence_source`; files and directories are allowed, directories are recursively inventoried in deterministic path order, and symlinks, hardlinks, sockets, devices, FIFOs, and paths outside the evidence root are rejected.
+- Every `/evidence/...` command argument MUST resolve to a captured `evidence_paths` entry. MendRune MUST NOT infer undeclared dependencies from arbitrary command behavior.
 - Every oracle `result_file` and scanner `raw_output` is an absolute container path strictly beneath `mounts.container_output_dir`.
 - Every command invocation receives a newly created empty output directory and separate bounded scratch space.
 - Command IDs are globally unique across shared regressions, unit regressions, and scanners. Generated check IDs include phase, stage sequence, unit, check kind, and command or vulnerability ID, and MUST be globally unique within a run.
 - Before Phase A, MendRune inventories, copies, and hashes every declared evidence input used by oracle or scanner commands, including executable PoCs, rules, configuration, normalizers, and fixtures. Symlinks and paths outside `mounts.evidence_source` are rejected. Undeclared file dependencies are unsupported.
 - Containers mount only the immutable evidence snapshot captured in the run store, never the live campaign directory.
+- `execution.allowed_generated_paths` defaults to an empty list. Entries are relative POSIX globs without absolute paths, NUL, or `..`; they MUST NOT overlap tracked files at the expected patch-derived state, any path changed by a supplied/effective patch, `.git`, protected paths, evidence, or MendRune artifacts.
+- Allowed generated paths authorize only creation and mutation of untracked regular files/directories. Modifying, deleting, replacing, or changing the mode/type of a tracked file always fails, even when its path matches an allowed generated glob.
+- Unexpected untracked paths outside allowed generated globs fail. Generated paths MAY persist between commands in one worktree when later checks require build outputs, but are bounded by configured resource limits, excluded from source loading, and removed before the final clean-state comparison and combined diff.
 - At least one shared regression is required.
 - At least one required scanner is required in v1.
 - The OCI image includes an explicit `@sha256:` digest, `network` is `none`, and all limits are positive and safely capped.
@@ -388,7 +419,7 @@ Each build, oracle, regression, and scan runs in a fresh container with controls
 
 Writable locations MUST be explicit bounded temporary filesystems or disposable mounts. Permitted mounts are the disposable worktree, immutable read-only evidence snapshot, one newly empty output directory per invocation, and bounded toolchain scratch space. MendRune MUST NOT mount the live campaign directory, host root, home, credentials, engine socket, devices, complete run store, MendRune source, or unrelated repositories.
 
-The source worktree SHOULD be mounted read-only when the project toolchain supports an out-of-tree build. If a toolchain requires a writable source tree, MendRune records the expected patch-derived tree state before each command and MUST compare tracked files, untracked files, file types, and modes after the command. Only explicitly declared disposable output paths may differ; those paths MUST be excluded from later source loading and removed before the next source-integrity comparison. Any other mutation fails the check. A final integrity comparison occurs after the final scanner run and before combined-diff generation.
+The source worktree SHOULD be mounted read-only when the project toolchain supports an out-of-tree build. If a toolchain requires a writable source tree, MendRune records the expected patch-derived state before each command and compares tracked file content, existence, type, and mode afterward. Tracked files never receive a mutation exception. Only untracked regular files/directories matching `execution.allowed_generated_paths` may differ. Generated paths are excluded from source-context collection and patch accounting; they MAY persist between commands within one worktree, but MUST be removed before final integrity comparison and combined-diff generation. Any other mutation fails the check. A final integrity comparison occurs after the final scanner run.
 
 The executor starts from an environment allowlist, applies wall-clock and output limits, records exact argv and runtime metadata, and kills/removes timed-out containers. Output symlinks, devices, sockets, and escaping paths are rejected.
 
@@ -918,6 +949,8 @@ Each step MUST land with tests and documentation. Goose integration MUST not blo
 The first implementation release MUST include:
 
 - installable Python package and planned CLI;
+- committed `pyproject.toml` and `uv.lock`, with uv-managed development and locked verification;
+- Ruff formatting/lint configuration and ty static type-check configuration;
 - campaign schema models and complete example campaign;
 - strict Git worktree/patch/policy implementation;
 - Phase A, Phase B, Phase C, and final orchestration;
@@ -935,21 +968,22 @@ The first implementation release MUST include:
 
 V1 is done only when:
 
-1. `mendrune verify` and the other documented commands behave as specified without claiming unsupported commands;
-2. one local repository and one full vulnerable base commit drive the entire run;
-3. no archive or known-fixed revision is required or processed;
-4. immutable supplied patches are the default effective inputs, and all oracle/scanner evidence is captured and hashed before execution;
-5. optional Goose adaptation is off by default, runs at most once per enabled patch before Phase A, and freezes origin, derived bytes, hashes, and provenance for all phases;
-6. Phase A requires build, shared regressions, all reproducing oracles, and required scans;
-7. every Phase B unit is verified from a fresh base worktree;
-8. Phase C follows only `composition.order`, performs strict pre-application reproduction, and reruns all accumulated oracles/regressions/scans;
-9. overlap has no skip/apply-anyway path;
-10. Git application is strict, hook-free, and checked against actual diffs;
-11. every untrusted command is followed by source-integrity verification, and the final check occurs after the final scanner;
-12. final evidence includes the supplied series and deterministic combined diff;
-13. acceptance is possible only through the full conjunction in Section 11;
-14. persistent MendRune records are safe YAML and hashes verify;
-15. untrusted code runs only in qualified rootless Podman with `crun-krun`/libkrun controls;
-16. all non-runtime tests pass, and runtime tests pass on a qualified host or are explicitly skipped for unavailable krun infrastructure;
-17. Goose's recipe validates with the installed CLI when Goose adaptation is delivered; and
-18. every accepted report states truthfully that MendRune cannot prove the absence of all vulnerabilities or regressions.
+1. `uv sync --locked --group dev`, `uv run ruff format --check .`, `uv run ruff check .`, `uv run ty check`, and `uv run pytest` pass;
+2. `mendrune verify` and the other documented commands behave as specified without claiming unsupported commands;
+3. one local repository and one full vulnerable base commit drive the entire run;
+4. no archive or known-fixed revision is required or processed;
+5. immutable supplied patches are the default effective inputs, and all oracle/scanner evidence is captured and hashed before execution;
+6. optional Goose adaptation is off by default, runs at most once per enabled patch before Phase A, and freezes origin, derived bytes, hashes, and provenance for all phases;
+7. Phase A requires build, shared regressions, all reproducing oracles, and required scans;
+8. every Phase B unit is verified from a fresh base worktree;
+9. Phase C follows only `composition.order`, performs strict pre-application reproduction, and reruns all accumulated oracles/regressions/scans;
+10. overlap has no skip/apply-anyway path;
+11. Git application is strict, hook-free, and checked against actual diffs;
+12. every untrusted command is followed by source-integrity verification, and the final check occurs after the final scanner;
+13. final evidence includes the supplied series and deterministic combined diff;
+14. acceptance is possible only through the full conjunction in Section 11;
+15. persistent MendRune records are safe YAML and hashes verify;
+16. untrusted code runs only in qualified rootless Podman with `crun-krun`/libkrun controls;
+17. all non-runtime tests pass, and runtime tests pass on a qualified host or are explicitly skipped for unavailable krun infrastructure;
+18. Goose's recipe validates with the installed CLI when Goose adaptation is delivered; and
+19. every accepted report states truthfully that MendRune cannot prove the absence of all vulnerabilities or regressions.

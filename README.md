@@ -89,6 +89,9 @@ repository:
   path: /absolute/path/to/local/repository
   base_ref: 6f1e2d3c4b5a69788776655443322110ffeeddcc
 
+execution:
+  allowed_generated_paths: [build/**, .pytest_cache/**]
+
 composition:
   order: [parser-fixes, auth-fix]
 
@@ -96,7 +99,10 @@ units:
   - id: parser-fixes
     vulnerabilities:
       - id: CVE-2026-1001
-        oracle: oracles/cve-2026-1001.yaml
+        oracle:
+          argv: [python, /evidence/oracles/cve-2026-1001.py]
+          evidence_paths: [oracles/cve-2026-1001.py]
+          result_file: /output/oracle-result.yaml
     patches:
       - id: parser-bounds
         path: patches/parser-bounds.diff
@@ -108,7 +114,10 @@ units:
   - id: auth-fix
     vulnerabilities:
       - id: CVE-2026-1002
-        oracle: oracles/cve-2026-1002.yaml
+        oracle:
+          argv: [python, /evidence/oracles/cve-2026-1002.py]
+          evidence_paths: [oracles/cve-2026-1002.py]
+          result_file: /output/oracle-result.yaml
     patches:
       - id: reject-empty-token
         path: patches/reject-empty-token.diff
@@ -128,9 +137,31 @@ Untrusted builds, PoCs, tests, and scanners run in fresh containers through root
 
 libkrun is defense in depth, not an absolute boundary. Host directories exposed through virtio-fs still require careful namespace and mount policy.
 
-MendRune snapshots and hashes every declared external input before execution, including patches, oracle programs, scanner rules/configuration, recipes, and other evidence files. Containers read that immutable snapshot rather than the live campaign directory.
+Every oracle, regression, and scanner command explicitly declares the external files or directories it needs through `evidence_paths`. MendRune recursively inventories regular files, rejects symlinks and special files, copies the declared inputs into an immutable run snapshot, and hashes them before execution. Containers read that snapshot rather than the live campaign directory; undeclared external dependencies are unsupported.
+
+Tracked source files must remain equal to the expected patch-derived state after every untrusted command. Builds may create untracked output only beneath explicit `execution.allowed_generated_paths` globs. The list defaults to empty, cannot overlap protected or patched paths, and is removed before the final combined diff is generated. Unexpected untracked files or any tracked-file mutation fail closed.
 
 MendRune-owned persistent data uses YAML. Patches and logs retain their native text formats. JSON may be transient only when an external interface, such as Goose's schema-constrained response or a scanner, requires it.
+
+## Development tooling
+
+MendRune standardizes on the [Astral](https://astral.sh/) Python toolchain:
+
+- **uv** manages the Python environment, dependency lockfile, installation, and command execution.
+- **Ruff** provides formatting and linting.
+- **ty** provides static type checking.
+
+Contributors and coding agents should install uv and run project commands through it rather than invoking a project virtual environment or `pip` directly. uv installs and executes the locked Ruff, ty, and pytest versions declared by the project:
+
+```bash
+uv sync --group dev
+uv run ruff format --check .
+uv run ruff check .
+uv run ty check
+uv run pytest
+```
+
+`uv.lock` is a required, version-controlled reproducibility artifact. CI and release verification must use the locked dependency graph.
 
 ## Planned command-line interface
 
