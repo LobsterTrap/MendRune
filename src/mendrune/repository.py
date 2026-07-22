@@ -145,9 +145,7 @@ class Worktree:
             raise ConfigurationError(
                 "tracked source tree changed unexpectedly", reason_code="actual_diff_mismatch"
             )
-        for raw_path in _git_bytes(
-            self.path, "ls-files", "--others", "--exclude-standard", "-z"
-        ).split(b"\0"):
+        for raw_path in _git_bytes(self.path, "ls-files", "--others", "-z").split(b"\0"):
             if not raw_path:
                 continue
             path = PurePosixPath(raw_path.decode("utf-8", errors="strict"))

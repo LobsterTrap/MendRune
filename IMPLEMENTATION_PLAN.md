@@ -229,7 +229,7 @@
 - **Status:** DONE
 - **Depends on:** P3-T04
 - **Deliverables:** Expected patch-derived tree fingerprint; tracked content/type/mode immutability after commands; only untracked regular files under `allowed_generated_paths`; generated cleanup before combined diff.
-- **Evidence recorded:** 2026-07-22 — deterministic tracked snapshots record path/mode/size/SHA-256; tracked mutations and undeclared/special generated files fail; declared untracked regular outputs pass. Final cleanup integration remains with P8-T03.
+- **Evidence recorded:** 2026-07-22 — deterministic tracked snapshots record path/mode/size/SHA-256; tracked mutations and undeclared, ignored, or special generated files fail; declared untracked regular outputs pass. Final cleanup integration remains with P8-T03.
 
 ---
 

@@ -119,6 +119,23 @@ def test_worktree_integrity_allows_only_declared_untracked_files(tmp_path: Path)
     assert raised.value.reason_code == "actual_diff_mismatch"
 
 
+def test_worktree_integrity_rejects_ignored_generated_file(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    create_repository(repository_path)
+    repository = verify_repository(repository_path, "HEAD")
+
+    with Worktree.create(repository, tmp_path / "scratch") as worktree:
+        expected = worktree.snapshot()
+        (worktree.path / ".gitignore").write_text("ignored.txt\n")
+        git(worktree.path, "add", ".gitignore")
+        expected = worktree.snapshot()
+        (worktree.path / "ignored.txt").write_text("output\n")
+        with pytest.raises(ConfigurationError) as raised:
+            worktree.verify_integrity(expected, ("build/**",))
+
+    assert raised.value.reason_code == "actual_diff_mismatch"
+
+
 def test_worktree_integrity_rejects_unexpected_generated_file(tmp_path: Path) -> None:
     repository_path = tmp_path / "repo"
     create_repository(repository_path)
