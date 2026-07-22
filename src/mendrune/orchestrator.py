@@ -1536,8 +1536,8 @@ def _accept_campaign(prepared: PreflightRun) -> dict[str, object]:
             raise MendRuneError(
                 "acceptance requires assembled evidence", reason_code="required_check_missing"
             )
-        store.verify_hash_manifest()
         _verify_final_evidence(prepared)
+        store.verify_hash_manifest()
 
         series = yaml.safe_load(
             store.artifact("final/supplied-series.yaml").path.read_text(encoding="utf-8")

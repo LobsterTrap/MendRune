@@ -278,6 +278,42 @@ def test_run_campaign_accepts_only_after_full_conjunction(
     assert not (campaign.parent / "runs/.workspaces/full-run").exists()
 
 
+def test_acceptance_rejects_missing_required_phase_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign, initial = _prepare(tmp_path, monkeypatch)
+    initial.close()
+    calls = []
+
+    def execute(config, invocation):
+        calls.append(invocation)
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            vulnerable = len(calls) in {3, 10}
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: "
+                f"{'true' if vulnerable else 'false'}\nobservation: checked\n"
+            )
+        elif invocation.argv == ("python", "/evidence/check.py"):
+            (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
+        return _result(invocation)
+
+    from mendrune import orchestrator
+
+    original_accept = orchestrator._accept_campaign
+
+    def delete_then_accept(prepared):
+        next((prepared.store.path / "phase-a/checks").glob("*.yaml")).unlink()
+        return original_accept(prepared)
+
+    monkeypatch.setattr(orchestrator, "_accept_campaign", delete_then_accept)
+    with pytest.raises(MendRuneError) as raised:
+        run_campaign(campaign, run_id="missing-evidence", execute=execute)
+
+    assert raised.value.reason_code == "required_check_missing"
+
+
 def test_acceptance_rejects_tampered_combined_diff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
