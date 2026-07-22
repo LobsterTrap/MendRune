@@ -195,7 +195,7 @@ def test_phase_c_strict_preapply_and_accumulated_checks_use_one_worktree(
                 f"schema_version: 1\nnonce: {nonce}\nvulnerable: "
                 f"{'true' if vulnerable else 'false'}\nobservation: checked\n"
             )
-        elif len(calls) == 6:
+        elif invocation.argv == ("python", "/evidence/check.py"):
             (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
         return _result(invocation)
 
@@ -209,6 +209,11 @@ def test_phase_c_strict_preapply_and_accumulated_checks_use_one_worktree(
         ("python", "/evidence/check.py"),
         ("python", "/evidence/check.py"),
         ("python", "/evidence/check.py"),
+        ("python", "-m", "build"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
     ]
     stage = prepared.store.path / "phase-c/stages/0001-fix-a"
     assert (
@@ -216,8 +221,20 @@ def test_phase_c_strict_preapply_and_accumulated_checks_use_one_worktree(
         is True
     )
     assert (stage / "manifest.yaml").is_file()
+    final = prepared.store.path / "final"
+    assert b"-old\n+new\n" in (final / "combined.diff").read_bytes()
+    series = yaml.safe_load((final / "supplied-series.yaml").read_text())
+    assert series["patches"][0]["effective_kind"] == "supplied"
     assert (
-        yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"] == "phase_c_verify"
+        series["combined_diff"]["sha256"]
+        == hashlib.sha256((final / "combined.diff").read_bytes()).hexdigest()
+    )
+    verdict_prep = yaml.safe_load((final / "verdict-prep.yaml").read_text())
+    assert verdict_prep["acceptance_evaluated"] is False
+    assert not (final / "verdict.yaml").exists()
+    assert (
+        yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"]
+        == "assembling_evidence"
     )
     prepared.store.verify_hash_manifest()
     prepared.close()

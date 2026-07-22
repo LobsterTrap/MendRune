@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P8-T03
-- **Last completed:** P8-T02
-- **Next action:** Implement final full-stack repetition, generated cleanup, combined diff/provenance, and acceptance evidence.
+- **Active task:** P8-T04
+- **Last completed:** P8-T03
+- **Next action:** Implement the acceptance conjunction, final verdict/report, CLI run path, and campaign-level cumulative failure fixtures.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -368,9 +368,10 @@
 
 ### P8-T03 — Final full-stack verification and combined diff
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P8-T02
 - **Deliverables:** Repeat all checks; remove allowed generated paths; final integrity; deterministic supplied series and combined diff.
+- **Evidence recorded:** 2026-07-22 — final verification repeats build/oracles/regressions/scans, compares the last stage, removes only allowed generated files, verifies clean tracked integrity, emits actual combined diff and ordered provenance, verifies required evidence/hashes, and advances to evidence assembly without premature acceptance.
 
 ### P8-T04 — Acceptance conjunction and campaign fixtures
 

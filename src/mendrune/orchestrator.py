@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import secrets
@@ -12,10 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Self
 
+import yaml
+
 from mendrune import executor
 from mendrune.errors import MendRuneError
 from mendrune.models import ExecutionConfig
 from mendrune.oracle import evaluate_oracle_result
+from mendrune.policy import matches_path
 from mendrune.regression import (
     evaluate_required_regression,
     select_accumulated_regressions,
@@ -761,6 +765,8 @@ def execute_phase_c(
                 state = _advance(
                     prepared.store, prepared.verified, state, RunState.PHASE_C_PREAPPLY
                 )
+        state = _advance(prepared.store, prepared.verified, state, RunState.FINAL_VERIFICATION)
+        _execute_final_verification(prepared, execute, worktree, expected, previous_findings, state)
         return results
     except Exception as exc:
         reason = exc.reason_code if isinstance(exc, MendRuneError) else "unexpected_exception"
@@ -794,6 +800,291 @@ def execute_phase_c(
                         f"cumulative worktree cleanup failed: {cleanup_error}",
                         reason_code="cleanup_uncertain",
                     ) from cleanup_error
+
+
+def _execute_final_verification(
+    prepared: PreflightRun,
+    execute: Executor,
+    worktree: Worktree,
+    expected: TreeSnapshot,
+    previous_findings: tuple[Finding, ...],
+    state: RunState,
+) -> None:
+    """Repeat the complete stack and persist evidence without accepting the run."""
+    config = prepared.verified.config
+    units = {unit.id: unit for unit in config.units}
+    root = "final"
+    sequence = 1
+
+    # Establish that the final repetition starts from the exact accepted cumulative stage.
+    worktree.verify_integrity(expected, config.execution.allowed_generated_paths)
+    prepared.store.write_yaml(
+        f"{root}/checks/0000-initial-integrity.yaml",
+        {
+            "schema_version": 1,
+            "check_id": "final-0000-initial-integrity",
+            "status": "passed",
+        },
+    )
+    _run_isolated_command(
+        prepared,
+        execute,
+        worktree,
+        expected,
+        root,
+        sequence,
+        "build",
+        "build",
+        config.commands.build.argv,
+        config.commands.build.timeout_seconds,
+        failure_code="final_build_failed",
+    )
+    for unit_id in config.composition.order:
+        for vulnerability in units[unit_id].vulnerabilities:
+            sequence += 1
+            nonce = secrets.token_hex(16)
+            result, output = _run_isolated_command(
+                prepared,
+                execute,
+                worktree,
+                expected,
+                root,
+                sequence,
+                "oracle",
+                vulnerability.id,
+                vulnerability.oracle.argv,
+                vulnerability.oracle.timeout_seconds,
+                environment={"MENDRUNE_ORACLE_NONCE": nonce},
+                failure_code="final_vulnerability_not_mitigated",
+            )
+            observation = evaluate_oracle_result(
+                output,
+                _container_output_path(
+                    output,
+                    config.mounts.container_output_dir,
+                    vulnerability.oracle.result_file,
+                ),
+                expected_nonce=nonce,
+                expected_vulnerable=False,
+                exit_code=result.exit_code if result.exit_code is not None else -1,
+                timed_out=result.timed_out,
+            )
+            prepared.store.write_yaml(
+                f"{root}/oracles/{sequence:04d}-{vulnerability.id}.yaml",
+                {
+                    "schema_version": 1,
+                    "check_id": f"final-{sequence:04d}-oracle-{vulnerability.id}",
+                    "status": "passed",
+                    "vulnerable": observation.vulnerable,
+                    "observation": observation.observation,
+                },
+            )
+
+    for scheduled in select_accumulated_regressions(config, config.composition.order):
+        sequence += 1
+        command = scheduled.command
+        result, _ = _run_isolated_command(
+            prepared,
+            execute,
+            worktree,
+            expected,
+            root,
+            sequence,
+            "regression",
+            command.id,
+            command.argv,
+            command.timeout_seconds,
+            failure_code="final_regression_failed",
+        )
+        evaluated = evaluate_required_regression(
+            command.id,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            failure_reason_code="final_regression_failed",
+        )
+        if not evaluated.passed:
+            raise MendRuneError(
+                "final regression failed",
+                reason_code=evaluated.reason_code or "final_regression_failed",
+            )
+
+    findings: list[Finding] = []
+    for scan in config.commands.scans:
+        sequence += 1
+        _, output = _run_isolated_command(
+            prepared,
+            execute,
+            worktree,
+            expected,
+            root,
+            sequence,
+            "scanner",
+            scan.id,
+            scan.argv,
+            scan.timeout_seconds,
+            failure_code="scanner_failed",
+        )
+        if scan.normalizer != "semgrep":
+            raise MendRuneError("unknown scanner normalizer", reason_code="scanner_output_invalid")
+        normalized = normalize_semgrep_json(
+            _container_output_path(
+                output, config.mounts.container_output_dir, scan.raw_output
+            ).read_bytes(),
+            config.scan_policy.severity_order,
+        )
+        findings.extend(normalized)
+        prepared.store.write_yaml(
+            f"{root}/scans/{sequence:04d}-{scan.id}.yaml",
+            {
+                "schema_version": 1,
+                "scanner_id": scan.id,
+                "findings": [_finding_record(item) for item in normalized],
+            },
+        )
+    final_findings = tuple(sorted(findings, key=lambda item: item.identity))
+    delta = compare_findings(
+        previous_findings,
+        final_findings,
+        severity_order=config.scan_policy.severity_order,
+        threshold=config.scan_policy.reject_new_findings_at_or_above,
+    )
+    prepared.store.write_yaml(
+        f"{root}/scan-comparison.yaml",
+        {
+            "schema_version": 1,
+            "baseline": "last-cumulative-stage",
+            "status": "passed" if delta.passed else "failed",
+            "prohibited": [_finding_record(item) for item in delta.prohibited],
+            "introduced": [_finding_record(item) for item in delta.introduced],
+            "severity_increases": [_finding_record(item) for item in delta.severity_increases],
+        },
+    )
+    if not delta.passed:
+        raise MendRuneError(
+            "final scan introduced prohibited finding", reason_code="prohibited_new_finding"
+        )
+
+    worktree.verify_integrity(expected, config.execution.allowed_generated_paths)
+    _remove_allowed_generated(worktree, expected, config.execution.allowed_generated_paths)
+    worktree.verify_integrity(expected)
+    prepared.store.write_yaml(
+        f"{root}/checks/{sequence + 1:04d}-final-integrity.yaml",
+        {
+            "schema_version": 1,
+            "check_id": f"final-{sequence + 1:04d}-final-integrity",
+            "status": "passed",
+        },
+    )
+
+    combined = worktree.diff()
+    _write_bytes_atomic(prepared.store.path / f"{root}/combined.diff", combined)
+    combined_sha256 = hashlib.sha256(combined).hexdigest()
+    series = []
+    patch_by_unit = {unit_id: [] for unit_id in config.composition.order}
+    for patch in prepared.patches:
+        patch_by_unit[patch.unit_id].append(patch)
+    for unit_id in config.composition.order:
+        for patch in patch_by_unit[unit_id]:
+            supplied = prepared.store.path.joinpath(*patch.supplied_path.parts).read_bytes()
+            effective = prepared.store.path.joinpath(*patch.effective_path.parts).read_bytes()
+            if (
+                hashlib.sha256(supplied).hexdigest() != patch.supplied_sha256
+                or hashlib.sha256(effective).hexdigest() != patch.effective_sha256
+            ):
+                raise MendRuneError(
+                    "frozen patch provenance is incomplete", reason_code="provenance_incomplete"
+                )
+            series.append(
+                {
+                    "sequence": len(series) + 1,
+                    "unit_id": unit_id,
+                    "patch_id": patch.patch_id,
+                    "supplied_path": patch.supplied_path.as_posix(),
+                    "supplied_sha256": patch.supplied_sha256,
+                    "effective_kind": patch.effective_kind,
+                    "effective_path": patch.effective_path.as_posix(),
+                    "effective_sha256": patch.effective_sha256,
+                }
+            )
+    prepared.store.write_yaml(
+        f"{root}/supplied-series.yaml",
+        {
+            "schema_version": 1,
+            "base_commit": prepared.verified.repository.base_commit,
+            "composition_order": list(config.composition.order),
+            "patches": series,
+            "combined_diff": {"path": "combined.diff", "sha256": combined_sha256},
+        },
+    )
+    _write_unit_manifest(prepared.store, root)
+    prepared.store.write_hash_manifest()
+    prepared.store.verify_hash_manifest()
+    _verify_final_evidence(prepared)
+    _advance(prepared.store, prepared.verified, state, RunState.ASSEMBLING_EVIDENCE)
+    prepared.store.write_yaml(
+        f"{root}/verdict-prep.yaml",
+        {
+            "schema_version": 1,
+            "status": "ready",
+            "acceptance_evaluated": False,
+            "base_commit": prepared.verified.repository.base_commit,
+            "units_verified": list(config.composition.order),
+            "combined_diff_sha256": combined_sha256,
+            "evidence_hashes_verified": True,
+        },
+    )
+    _write_unit_manifest(prepared.store, root)
+    prepared.store.write_hash_manifest()
+    prepared.store.verify_hash_manifest()
+
+
+def _remove_allowed_generated(
+    worktree: Worktree, expected: TreeSnapshot, allowed: tuple[str, ...]
+) -> None:
+    tracked = {entry.path.as_posix() for entry in expected.tracked}
+    for path in sorted(worktree.path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        relative = path.relative_to(worktree.path).as_posix()
+        if relative == ".git" or relative in tracked:
+            continue
+        if path.is_file() and not path.is_symlink():
+            if not any(matches_path(pattern, relative) for pattern in allowed):
+                raise MendRuneError(
+                    f"unexpected generated path: {relative}", reason_code="actual_diff_mismatch"
+                )
+            path.unlink()
+        elif path.is_dir():
+            with contextlib.suppress(OSError):
+                path.rmdir()
+
+
+def _verify_final_evidence(prepared: PreflightRun) -> None:
+    required = [
+        "input/campaign.yaml",
+        "input/repository.yaml",
+        "input/patches.yaml",
+        "input/evidence-manifest.yaml",
+        "final/combined.diff",
+        "final/supplied-series.yaml",
+        "final/scan-comparison.yaml",
+        "final/manifest.yaml",
+    ]
+    if (prepared.store.path / "phase-b").exists():
+        required.extend(
+            f"phase-b/{unit_id}/manifest.yaml"
+            for unit_id in prepared.verified.config.composition.order
+        )
+    required.extend(
+        f"phase-c/stages/{index:04d}-{unit_id}/manifest.yaml"
+        for index, unit_id in enumerate(prepared.verified.config.composition.order, start=1)
+    )
+    for relative in required:
+        prepared.store.artifact(relative)
+    for check in prepared.store.path.glob("**/checks/*.yaml"):
+        document = yaml.safe_load(check.read_text(encoding="utf-8"))
+        if not isinstance(document, dict) or document.get("status") != "passed":
+            raise MendRuneError(
+                f"required check is not passing: {check}", reason_code="required_check_missing"
+            )
 
 
 def _run_isolated_command(
