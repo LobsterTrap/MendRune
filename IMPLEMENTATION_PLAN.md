@@ -8,10 +8,10 @@
 
 ## Current handoff
 
-- **Current phase:** P9/P10 — optional adaptation and release hardening
-- **Active task:** P10-T04
-- **Last completed:** P10-T03
-- **Next action:** Perform final security and clean-diff review, record qualified-runtime limitation, and make the release decision.
+- **Current phase:** Complete — P0 through P10 implemented
+- **Active task:** None
+- **Last completed:** P10-T04
+- **Next action:** Supply `MENDRUNE_RUNTIME_TEST_IMAGE` on a qualified host and run `uv run pytest -m runtime` to add real libkrun evidence before publishing a runtime-qualified release.
 - **Known blockers:** Qualified runtime tests require `MENDRUNE_RUNTIME_TEST_IMAGE` to name a locally available immutable digest image; six security tests skip explicitly until supplied.
 - **Checkpoint state:** Deterministic P0–P8 implementation is committed through full campaign acceptance, with runtime tests present and gated on qualified infrastructure.
 - **Resume protocol:** Run the Astral quality gates and `pytest -m runtime` with a qualified local image when available. Keep Goose unable to affect deterministic acceptance checks.
@@ -42,7 +42,7 @@
 | P7 | Phase B isolated remediation units | DONE | P6 |
 | P8 | Phase C cumulative composition and final verdict | DONE | P7 |
 | P9 | Optional Goose adaptation | DONE | P8 |
-| P10 | Hardening, end-to-end fixtures, release readiness | NOT_STARTED | P8–P9 |
+| P10 | Hardening, end-to-end fixtures, release readiness | DONE | P8–P9 |
 
 ---
 
@@ -445,13 +445,14 @@
   # On a qualified host:
   uv run pytest -m runtime
   ```
-- **Evidence recorded:** 2026-07-22 — locked sync, Ruff format/lint, ty, full pytest (171 passed, 6 runtime skipped), generated-example verify, runtime selection (6 explicit skips because `MENDRUNE_RUNTIME_TEST_IMAGE` is unset), and `git diff --check` all completed successfully.
+- **Evidence recorded:** 2026-07-22 — final rerun after all review fixes: locked sync, Ruff format/lint, ty, full pytest (178 passed, 6 runtime skipped), Goose recipe validation, generated-example verify, runtime selection (6 explicit skips because `MENDRUNE_RUNTIME_TEST_IMAGE` is unset), and `git diff --check` all completed successfully.
 
 ### P10-T04 — Final review and release decision
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P10-T03
 - **Deliverables:** Security review, clean diff review, known limitations, runtime evidence, no unsupported completion claims.
+- **Evidence recorded:** 2026-07-22 — two review rounds resolved acceptance completeness, scanner identity/confinement, bounded writable storage, frozen recipe validation, effective line budget, and unsupported patch-state findings. Final independent reviewer decision: GO; no release blockers. Qualified runtime execution remains unproven because the required local digest-pinned image was not supplied.
 
 ## Parallel-work guidance
 
