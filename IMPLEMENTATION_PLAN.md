@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P6-T03
-- **Last completed:** P6-T02
-- **Next action:** Add the baseline end-to-end fixture and failure matrix, then proceed to isolated Phase B worktrees.
+- **Active task:** P7-T01/P7-T02
+- **Last completed:** P6-T03
+- **Next action:** Complete isolated Phase B worktrees, deterministic checks, scanner comparison, and evidence persistence.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -38,7 +38,7 @@
 | P3 | Git worktrees, strict patches, tree integrity | DONE | P1–P2 |
 | P4 | Deterministic oracle, regressions, scanner logic | DONE | P1–P2 |
 | P5 | Podman/krun executor and preflight | DONE | P1–P2 |
-| P6 | Phase A baseline vertical slice | NOT_STARTED | P3–P5 |
+| P6 | Phase A baseline vertical slice | DONE | P3–P5 |
 | P7 | Phase B isolated remediation units | NOT_STARTED | P6 |
 | P8 | Phase C cumulative composition and final verdict | NOT_STARTED | P7 |
 | P9 | Optional Goose adaptation | NOT_STARTED | P8 |
@@ -318,9 +318,10 @@
 
 ### P6-T03 — Baseline end-to-end fixture
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P6-T02
 - **Acceptance:** Valid baseline persists evidence; non-reproducing oracle, mutation, scanner failure, and regression failure terminate with stable codes.
+- **Evidence recorded:** 2026-07-22 — real temporary Git/worktree/run-store integration tests persist successful baseline evidence and prove stable failures for non-reproduction, source mutation, scanner failure, and regression failure.
 
 ---
 
