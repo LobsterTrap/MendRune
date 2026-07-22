@@ -414,9 +414,10 @@
 
 ### P10-T01 — Hostile-input security suite
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P8–P9
 - **Deliverables:** YAML bombs, symlinks/FIFOs, hostile Git config/hooks, traversal diffs, ANSI/control output, output symlinks, oversized artifacts, prompt injection as inert data.
+- **Evidence recorded:** 2026-07-22 — 22 security tests cover YAML bombs/limits/tags, symlinks/FIFOs/hardlinks, oversized evidence/oracles, hostile Git hooks/config/environment, traversal diffs, bounded ANSI/control output, output symlinks, and inert prompt-injection strings.
 
 ### P10-T02 — Documentation/example parity
 
