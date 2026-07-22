@@ -262,6 +262,20 @@ class PatchPolicyConfig(StrictModel):
     allow_deleted_files: bool = False
     allow_mode_changes: bool = False
 
+    @model_validator(mode="after")
+    def reject_unsupported_patch_features(self) -> PatchPolicyConfig:
+        if any(
+            (
+                self.allow_binary,
+                self.allow_renames,
+                self.allow_new_files,
+                self.allow_deleted_files,
+                self.allow_mode_changes,
+            )
+        ):
+            raise ValueError("v1 does not support binary, rename, create, delete, or mode patches")
+        return self
+
     @field_validator("allowed_paths", "denied_paths")
     @classmethod
     def validate_path_patterns(cls, value: tuple[str, ...]) -> tuple[str, ...]:

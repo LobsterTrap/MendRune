@@ -78,6 +78,20 @@ def campaign_data() -> dict:
     }
 
 
+def test_rejects_patch_features_not_accounted_by_v1() -> None:
+    for field in (
+        "allow_binary",
+        "allow_renames",
+        "allow_new_files",
+        "allow_deleted_files",
+        "allow_mode_changes",
+    ):
+        data = campaign_data()
+        data["patch_policy"][field] = True
+        with pytest.raises(ValueError, match="v1 does not support"):
+            CampaignConfig.model_validate(data)
+
+
 def test_complete_campaign_is_valid() -> None:
     campaign = CampaignConfig.model_validate(campaign_data())
     assert campaign.composition.order == ("fix-a",)
