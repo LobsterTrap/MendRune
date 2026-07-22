@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P5-T03
-- **Last completed:** P5-T02
-- **Next action:** Complete strict runtime preflight qualification, then runtime security tests and Phase A orchestration.
+- **Active task:** P5-T04/P6-T01
+- **Last completed:** P5-T03
+- **Next action:** Add qualified-host runtime security tests while integrating Phase A preflight and immutable capture orchestration.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -286,9 +286,10 @@
 
 ### P5-T03 — Runtime preflight
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P5-T02
 - **Deliverables:** Non-root, rootless Podman, runtime identity, KVM/libkrun launch, exact image digest, resource/network controls.
+- **Evidence recorded:** 2026-07-22 — mocked preflight tests cover non-root/rootless Podman, executable crun + libkrun identity, writable KVM, exact local image digest, hardened no-pull qualification launch, and fail-closed cleanup.
 
 ### P5-T04 — Runtime security tests
 

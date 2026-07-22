@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mendrune.errors import MendRuneError
-from mendrune.executor import Invocation, Mount, build_podman_command, execute
+from mendrune.executor import Invocation, Mount, build_podman_command, execute, preflight
 from mendrune.models import ExecutionConfig
 from tests.unit.test_models import campaign_data
 
@@ -149,3 +149,105 @@ def test_cleanup_uncertainty_fails_closed() -> None:
         execute(execution, invocation(execution))
 
     assert raised.value.reason_code == "cleanup_uncertain"
+
+
+def preflight_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    if command[:2] == ["crun-krun", "--version"]:
+        return subprocess.CompletedProcess(command, 0, "crun version 1.20 +KRUN", "")
+    if command[:3] == ["podman", "info", "--format"]:
+        return subprocess.CompletedProcess(command, 0, "true\n", "")
+    if command[:3] == ["podman", "image", "inspect"]:
+        return subprocess.CompletedProcess(command, 0, config().image.rsplit("@", 1)[1], "")
+    return subprocess.CompletedProcess(command, 0, "", "")
+
+
+def test_preflight_qualifies_strict_runtime_and_launch_controls() -> None:
+    with (
+        patch("mendrune.executor.os.geteuid", return_value=1000),
+        patch("mendrune.executor._which", return_value=Path("crun-krun")),
+        patch("mendrune.executor.Path.is_file", return_value=True),
+        patch("mendrune.executor.os.access", return_value=True),
+        patch("mendrune.executor.os.open", return_value=9) as open_kvm,
+        patch("mendrune.executor.os.close") as close_kvm,
+        patch("mendrune.executor.subprocess.run", side_effect=preflight_run) as run,
+    ):
+        preflight(config())
+
+    open_kvm.assert_called_once()
+    assert open_kvm.call_args.args[0] == "/dev/kvm"
+    close_kvm.assert_called_once_with(9)
+    launch = next(
+        call.args[0] for call in run.call_args_list if call.args[0][:2] == ["podman", "run"]
+    )
+    assert "--pull=never" in launch
+    assert launch[launch.index("--runtime") + 1] == "crun-krun"
+    assert launch[launch.index("--network") + 1] == "none"
+    assert launch[launch.index("--cap-drop") + 1] == "all"
+    assert "no-new-privileges" in launch
+    assert "--read-only" in launch
+    assert launch[launch.index("--cpus") + 1] == str(config().cpus)
+    assert launch[launch.index("--memory") + 1] == f"{config().memory_mib}m"
+    assert launch[launch.index("--pids-limit") + 1] == str(config().pids_limit)
+    assert launch[-2:] == [config().image, "true"]
+    cleanup = run.call_args_list[-1].args[0]
+    assert cleanup[:5] == ["podman", "rm", "--force", "--ignore", launch[4]]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason_code"),
+    [
+        ({"euid": 0}, "rootless_required"),
+        ({"rootless": "false"}, "rootless_required"),
+        ({"runtime": None}, "runtime_unavailable"),
+        ({"identity": "crun version 1.20"}, "runtime_unqualified"),
+        ({"kvm_error": PermissionError()}, "runtime_unqualified"),
+        ({"digest": "sha256:" + "f" * 64}, "image_digest_mismatch"),
+        ({"launch_status": 125}, "runtime_unqualified"),
+        ({"cleanup_status": 125}, "cleanup_uncertain"),
+    ],
+)
+def test_preflight_fails_closed(overrides: dict[str, object], reason_code: str) -> None:
+    execution = config()
+
+    def run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["crun-krun", "--version"]:
+            return subprocess.CompletedProcess(
+                command, 0, str(overrides.get("identity", "crun version 1.20 +KRUN")), ""
+            )
+        if command[:3] == ["podman", "info", "--format"]:
+            return subprocess.CompletedProcess(
+                command, 0, str(overrides.get("rootless", "true")), ""
+            )
+        if command[:3] == ["podman", "image", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                str(overrides.get("digest", execution.image.rsplit("@", 1)[1])),
+                "",
+            )
+        if command[:2] == ["podman", "run"]:
+            launch_status = overrides.get("launch_status", 0)
+            assert isinstance(launch_status, int)
+            return subprocess.CompletedProcess(command, launch_status, "", "launch failed")
+        cleanup_status = overrides.get("cleanup_status", 0)
+        assert isinstance(cleanup_status, int)
+        return subprocess.CompletedProcess(command, cleanup_status, "", "cleanup failed")
+
+    kvm = overrides.get("kvm_error", 9)
+    with (
+        patch("mendrune.executor.os.geteuid", return_value=overrides.get("euid", 1000)),
+        patch("mendrune.executor._which", return_value=overrides.get("runtime", Path("crun-krun"))),
+        patch("mendrune.executor.Path.is_file", return_value=True),
+        patch("mendrune.executor.os.access", return_value=True),
+        patch(
+            "mendrune.executor.os.open",
+            side_effect=kvm if isinstance(kvm, OSError) else None,
+            return_value=kvm,
+        ),
+        patch("mendrune.executor.os.close"),
+        patch("mendrune.executor.subprocess.run", side_effect=run),
+        pytest.raises(MendRuneError) as raised,
+    ):
+        preflight(execution)
+
+    assert raised.value.reason_code == reason_code

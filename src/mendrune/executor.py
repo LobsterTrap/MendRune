@@ -219,18 +219,99 @@ def preflight(config: ExecutionConfig) -> None:
     if os.geteuid() == 0:
         raise MendRuneError("MendRune requires a non-root user", reason_code="rootless_required")
     rootless = _podman("info", "--format", "{{.Host.Security.Rootless}}")
-    if rootless.strip() != "true":
+    if rootless.strip().lower() != "true":
         raise MendRuneError("Podman is not rootless", reason_code="rootless_required")
+
     runtime = Path(config.runtime)
     runtime_path = runtime if runtime.is_absolute() else _which(config.runtime)
-    if runtime_path is None or not runtime_path.is_file():
+    if runtime_path is None or not runtime_path.is_file() or not os.access(runtime_path, os.X_OK):
         raise MendRuneError("configured runtime is unavailable", reason_code="runtime_unavailable")
-    if not Path("/dev/kvm").exists():
-        raise MendRuneError("KVM is unavailable", reason_code="runtime_unqualified")
+    _qualify_runtime_identity(runtime_path)
+    _qualify_kvm()
+
     inspected = _podman("image", "inspect", config.image, "--format", "{{.Digest}}")
     expected = config.image.rsplit("@", 1)[1]
     if inspected.strip() != expected:
         raise MendRuneError("image digest mismatch", reason_code="image_digest_mismatch")
+    _qualify_runtime_launch(config)
+
+
+def _qualify_runtime_identity(runtime_path: Path) -> None:
+    try:
+        result = subprocess.run(
+            [str(runtime_path), "--version"],
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MendRuneError(
+            "configured runtime is unavailable", reason_code="runtime_unavailable"
+        ) from exc
+    identity = f"{result.stdout}\n{result.stderr}".lower()
+    if (
+        result.returncode != 0
+        or "crun" not in identity
+        or not ("+krun" in identity or "libkrun" in identity)
+    ):
+        raise MendRuneError(
+            "configured runtime is not crun with libkrun capability",
+            reason_code="runtime_unqualified",
+        )
+
+
+def _qualify_kvm() -> None:
+    try:
+        descriptor = os.open("/dev/kvm", os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise MendRuneError("KVM is unusable", reason_code="runtime_unqualified") from exc
+    os.close(descriptor)
+
+
+def _qualify_runtime_launch(config: ExecutionConfig) -> None:
+    container_name = f"mendrune-preflight-{uuid.uuid4().hex}"
+    invocation = Invocation(
+        image=config.image,
+        argv=("true",),
+        mounts=(),
+        environment={},
+        timeout_seconds=30,
+    )
+    command = build_podman_command(config, invocation, container_name=container_name)
+    command.insert(2, "--pull=never")
+    launch_error: Exception | None = None
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"},
+        )
+        if result.returncode != 0:
+            launch_error = RuntimeError(
+                f"qualification container exited with status {result.returncode}: "
+                f"{result.stderr.strip()[:1000]}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        launch_error = exc
+    finally:
+        cleanup_error = _container_command("rm", "--force", "--ignore", container_name)
+    if cleanup_error is not None:
+        raise MendRuneError(
+            f"preflight container cleanup uncertain: {cleanup_error}",
+            reason_code="cleanup_uncertain",
+        ) from cleanup_error
+    if launch_error is not None:
+        raise MendRuneError(
+            f"libkrun qualification launch failed: {launch_error}",
+            reason_code="runtime_unqualified",
+        ) from launch_error
 
 
 def _which(value: str) -> Path | None:
