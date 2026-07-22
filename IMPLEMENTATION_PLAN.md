@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P9/P10 — optional adaptation and release hardening
-- **Active task:** P10-T02
-- **Last completed:** P10-T01
-- **Next action:** Reconcile README/specification with the implemented CLI and add a runnable documented example campaign, then execute the final matrix and review.
+- **Active task:** P10-T03
+- **Last completed:** P10-T02
+- **Next action:** Execute the complete locked-tooling verification matrix, then perform final security/diff review and release decision.
 - **Known blockers:** Qualified runtime tests require `MENDRUNE_RUNTIME_TEST_IMAGE` to name a locally available immutable digest image; six security tests skip explicitly until supplied.
 - **Checkpoint state:** Deterministic P0–P8 implementation is committed through full campaign acceptance, with runtime tests present and gated on qualified infrastructure.
 - **Resume protocol:** Run the Astral quality gates and `pytest -m runtime` with a qualified local image when available. Keep Goose unable to affect deterministic acceptance checks.
@@ -425,9 +425,10 @@
 
 ### P10-T02 — Documentation/example parity
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** all implemented phases
 - **Deliverables:** README commands and complete campaign run exactly as documented; accepted/rejected example reports.
+- **Evidence recorded:** 2026-07-22 — README/spec reflect implemented verify/run/status/report behavior and limitations; `campaigns/example/setup.py` deterministically generates a complete campaign; integration test generates and verifies it without Podman. Runtime execution remains qualified-image dependent as documented.
 
 ### P10-T03 — Full verification matrix
 

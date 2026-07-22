@@ -1,8 +1,8 @@
 # MendRune
 
-MendRune is a design-stage verifier for Git-based security remediation campaigns.
+MendRune verifies Git-based security remediation campaigns.
 
-You supply one local Git repository, one immutable vulnerable base commit, ordered remediation units, and immutable unified-diff patches. MendRune's planned Python orchestrator verifies each unit alone and then composes the full patch stack in disposable, rootless [Podman](https://podman.io/) containers backed by `crun-krun` and [libkrun](https://github.com/containers/libkrun). Configuration, state, normalized results, and evidence metadata remain inspectable YAML files.
+You supply one local Git repository, one immutable vulnerable base commit, ordered remediation units, and immutable unified-diff patches. MendRune verifies each unit alone and then composes the full patch stack in disposable, rootless [Podman](https://podman.io/) containers backed by `crun-krun` and [libkrun](https://github.com/containers/libkrun). Configuration, state, normalized results, and evidence metadata remain inspectable YAML files.
 
 > **Patches are supplied; deterministic execution decides.**
 >
@@ -10,7 +10,7 @@ You supply one local Git repository, one immutable vulnerable base commit, order
 
 ## Status
 
-MendRune is currently a design, not an implemented CLI. Commands and layouts shown here describe the implementation target. See [SPECIFICATION.md](SPECIFICATION.md) for the normative implementation handoff.
+MendRune provides the `verify`, `run`, `status`, and `report` commands. `verify` is a host-side, non-executing configuration check and does not require Podman. `run` executes repository code and requires a qualified rootless Podman host with the configured `crun-krun`/libkrun runtime and an image whose digest matches the campaign. Runtime acceptance is supported only in that qualified environment; generating or verifying the example does not establish runtime acceptance.
 
 ## Why campaigns?
 
@@ -69,7 +69,7 @@ Goose patch adaptation is disabled by default. When an operator enables it for a
 
 The recipe is limited to verified Goose recipe capabilities: `version`, `title`, `description`, a required file parameter, `prompt`, `extensions: []`, `settings.temperature`, `settings.max_turns`, and `response.json_schema`.
 
-The planned controller validates and invokes recipes with:
+The controller validates and invokes recipes with:
 
 ```bash
 goose recipe validate recipes/adapt-patch.yaml
@@ -78,54 +78,36 @@ goose run --recipe recipes/adapt-patch.yaml \
   --no-session --quiet
 ```
 
-These are Goose commands used by the future implementation; MendRune does not currently implement the surrounding workflow.
+## Runnable example
 
-## Example campaign
+The checked-in generator creates a tiny local Git repository, evidence programs, a patch, and a complete `campaign.yaml`. It records the generated base commit and patch SHA-256 automatically, avoiding a nested Git repository in this source tree.
 
-```yaml
-schema_version: 1
-campaign_id: example-campaign
-repository:
-  path: /absolute/path/to/local/repository
-  base_ref: 6f1e2d3c4b5a69788776655443322110ffeeddcc
-
-execution:
-  allowed_generated_paths: [build/**, .pytest_cache/**]
-
-composition:
-  order: [parser-fixes, auth-fix]
-
-units:
-  - id: parser-fixes
-    vulnerabilities:
-      - id: CVE-2026-1001
-        oracle:
-          argv: [python, /evidence/oracles/cve-2026-1001.py]
-          evidence_paths: [oracles/cve-2026-1001.py]
-          result_file: /output/oracle-result.yaml
-    patches:
-      - id: parser-bounds
-        path: patches/parser-bounds.diff
-        adapt_with_goose: false
-    regressions:
-      - id: parser-tests
-        argv: [python, -m, pytest, tests/parser]
-
-  - id: auth-fix
-    vulnerabilities:
-      - id: CVE-2026-1002
-        oracle:
-          argv: [python, /evidence/oracles/cve-2026-1002.py]
-          evidence_paths: [oracles/cve-2026-1002.py]
-          result_file: /output/oracle-result.yaml
-    patches:
-      - id: reject-empty-token
-        path: patches/reject-empty-token.diff
-        adapt_with_goose: false
-    regressions: []
+```bash
+uv sync --locked --group dev
+uv run python campaigns/example/setup.py
+uv run mendrune verify campaigns/example/generated/campaign.yaml
 ```
 
-The full schema, including execution, scan, policy, oracle, and storage fields, is in [SPECIFICATION.md](SPECIFICATION.md).
+`verify` reads configuration and local Git metadata only; it does not invoke Podman or execute repository code. A successful result ends with output similar to:
+
+```text
+verified campaign documented-example at base commit <40-character-commit>
+```
+
+The generator uses a syntactically valid all-zero placeholder image digest by default because `verify` checks syntax, not local image availability. That placeholder does **not** qualify the campaign for `run`. To prepare the generated configuration for a qualified runtime, provide the exact digest of an image already available to that environment:
+
+```bash
+MENDRUNE_EXAMPLE_IMAGE_DIGEST='sha256:<64-lowercase-hex-digits>' \
+  uv run python campaigns/example/setup.py
+```
+
+Then run only on a host that satisfies the rootless Podman and `crun-krun`/libkrun preflight:
+
+```bash
+uv run mendrune run campaigns/example/generated/campaign.yaml
+```
+
+Do not interpret successful generation or `verify` output as runtime acceptance. See [SPECIFICATION.md](SPECIFICATION.md) for the complete schema and runtime requirements.
 
 ## Safe vulnerability oracles
 
@@ -163,21 +145,19 @@ uv run pytest
 
 `uv.lock` is a required, version-controlled reproducibility artifact. CI and release verification must use the locked dependency graph.
 
-## Planned command-line interface
+## Command-line interface
 
 ```bash
-mendrune verify campaigns/example/campaign.yaml
-mendrune run campaigns/example/campaign.yaml
-mendrune status <run-id>
-mendrune report <run-id>
+mendrune verify <campaign.yaml>
+mendrune run <campaign.yaml>
+mendrune --runs-root <directory> status <run-id>
+mendrune --runs-root <directory> report <run-id>
 ```
 
-These commands are not currently implemented.
-
-- `mendrune verify` checks campaign YAML, paths, Git identities, patch hashes and syntax, policies, and optional Goose recipes without executing repository code.
-- `run` performs the campaign.
-- `status` reads persisted run state.
-- `report` renders recorded evidence without rerunning checks.
+- `verify` checks campaign YAML, paths, Git identities, patch hashes and syntax, policies, evidence declarations, and optional Goose recipes without executing repository code or requiring Podman.
+- `run` performs the campaign and requires the qualified container runtime and exact configured image digest.
+- `status` reads persisted run state from `--runs-root` (default: `runs`).
+- `report` renders recorded evidence from `--runs-root` without rerunning checks.
 
 The configuration-checking subcommand is `verify`, not `validate`.
 
