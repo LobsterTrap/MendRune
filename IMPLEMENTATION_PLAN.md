@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P9/P10 — optional adaptation and release hardening
-- **Active task:** P10-T03
-- **Last completed:** P10-T02
-- **Next action:** Execute the complete locked-tooling verification matrix, then perform final security/diff review and release decision.
+- **Active task:** P10-T04
+- **Last completed:** P10-T03
+- **Next action:** Perform final security and clean-diff review, record qualified-runtime limitation, and make the release decision.
 - **Known blockers:** Qualified runtime tests require `MENDRUNE_RUNTIME_TEST_IMAGE` to name a locally available immutable digest image; six security tests skip explicitly until supplied.
 - **Checkpoint state:** Deterministic P0–P8 implementation is committed through full campaign acceptance, with runtime tests present and gated on qualified infrastructure.
 - **Resume protocol:** Run the Astral quality gates and `pytest -m runtime` with a qualified local image when available. Keep Goose unable to affect deterministic acceptance checks.
@@ -432,7 +432,7 @@
 
 ### P10-T03 — Full verification matrix
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P10-T01–P10-T02
 - **Acceptance commands:**
   ```bash
@@ -445,6 +445,7 @@
   # On a qualified host:
   uv run pytest -m runtime
   ```
+- **Evidence recorded:** 2026-07-22 — locked sync, Ruff format/lint, ty, full pytest (171 passed, 6 runtime skipped), generated-example verify, runtime selection (6 explicit skips because `MENDRUNE_RUNTIME_TEST_IMAGE` is unset), and `git diff --check` all completed successfully.
 
 ### P10-T04 — Final review and release decision
 
