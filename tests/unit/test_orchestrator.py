@@ -1,5 +1,6 @@
 import hashlib
 import subprocess
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,7 +9,12 @@ import yaml
 
 from mendrune.errors import MendRuneError
 from mendrune.executor import CapturedOutput, ExecutionResult
-from mendrune.orchestrator import execute_phase_a, execute_phase_b, prepare_preflight
+from mendrune.orchestrator import (
+    execute_phase_a,
+    execute_phase_b,
+    execute_phase_c,
+    prepare_preflight,
+)
 from tests.integration.test_verify_cli import create_campaign
 
 
@@ -158,6 +164,169 @@ def test_phase_b_applies_unit_in_fresh_worktree_and_persists_evidence(
     )
     assert patch_record["placements"][0]["path"] == "src/a.py"
     assert (prepared.store.path / "phase-b/fix-a/manifest.yaml").is_file()
+    prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_phase_c_strict_preapply_and_accumulated_checks_use_one_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+    created_paths = []
+    from mendrune.repository import Worktree
+
+    original_create = Worktree.create
+
+    def create(*args, **kwargs):
+        worktree = original_create(*args, **kwargs)
+        created_paths.append(worktree.path)
+        return worktree
+
+    monkeypatch.setattr("mendrune.orchestrator.Worktree.create", create)
+    calls = []
+
+    def execute(config, invocation):
+        calls.append(invocation)
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            vulnerable = invocation.argv == ("python", "/evidence/check.py") and len(calls) == 1
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: "
+                f"{'true' if vulnerable else 'false'}\nobservation: checked\n"
+            )
+        elif len(calls) == 6:
+            (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
+        return _result(invocation)
+
+    assert execute_phase_c(prepared, (), execute=execute) == {"fix-a": ()}
+    assert len(created_paths) == 1
+    assert not created_paths[0].exists()
+    assert [call.argv for call in calls] == [
+        ("python", "/evidence/check.py"),
+        ("python", "-m", "build"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+        ("python", "/evidence/check.py"),
+    ]
+    stage = prepared.store.path / "phase-c/stages/0001-fix-a"
+    assert (
+        yaml.safe_load(next((stage / "oracles").glob("*preapply*.yaml")).read_text())["vulnerable"]
+        is True
+    )
+    assert (stage / "manifest.yaml").is_file()
+    assert (
+        yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"] == "phase_c_verify"
+    )
+    prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_phase_c_already_mitigated_has_stable_overlap_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, prepared = _prepare(tmp_path, monkeypatch)
+    paths = []
+    from mendrune.repository import Worktree
+
+    original_create = Worktree.create
+
+    def create(*args, **kwargs):
+        worktree = original_create(*args, **kwargs)
+        paths.append(worktree.path)
+        return worktree
+
+    monkeypatch.setattr("mendrune.orchestrator.Worktree.create", create)
+
+    def execute(config, invocation):
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+        (output / "oracle.yaml").write_text(
+            f"schema_version: 1\nnonce: {nonce}\nvulnerable: false\nobservation: overlap\n"
+        )
+        return _result(invocation)
+
+    with pytest.raises(MendRuneError) as raised:
+        execute_phase_c(prepared, (), execute=execute)
+
+    assert raised.value.reason_code == "unit_vulnerability_already_mitigated"
+    assert not paths[0].exists()
+    assert (
+        yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"]
+        == "ambiguous_overlap"
+    )
+    failure = yaml.safe_load(
+        (prepared.store.path / "phase-c/stages/0001-fix-a/failure.yaml").read_text()
+    )
+    assert failure["reason_code"] == "unit_vulnerability_already_mitigated"
+    prepared.store.verify_hash_manifest()
+    prepared.close()
+
+
+def test_phase_c_detects_reopened_prior_vulnerability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = create_campaign(tmp_path)
+    repository = Path(yaml.safe_load(campaign.read_text())["repository"]["path"])
+    (repository / "src").mkdir()
+    (repository / "src/a.py").write_text("old\n")
+    subprocess.run(["git", "-C", repository, "add", "src/a.py"], check=True)
+    subprocess.run(["git", "-C", repository, "commit", "-qm", "fixture source"], check=True)
+    second_patch = campaign.parent / "patches/b.diff"
+    second_patch.write_bytes(b"--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-new\n+old\n")
+    document = yaml.safe_load(campaign.read_text())
+    second_unit = {
+        "id": "fix-b",
+        "vulnerabilities": [
+            {
+                "id": "CVE-2026-2",
+                "oracle": deepcopy(document["units"][0]["vulnerabilities"][0]["oracle"]),
+            }
+        ],
+        "patches": [
+            {
+                "id": "patch-b",
+                "path": "patches/b.diff",
+                "sha256": hashlib.sha256(second_patch.read_bytes()).hexdigest(),
+            }
+        ],
+        "regressions": [],
+    }
+    document["units"].append(second_unit)
+    document["composition"]["order"].append("fix-b")
+    campaign.write_text(yaml.safe_dump(document, sort_keys=False))
+    monkeypatch.setattr("mendrune.orchestrator.executor.preflight", lambda config: None)
+    prepared = prepare_preflight(campaign, run_id="run-1")
+    oracle_calls = 0
+
+    def execute(config, invocation):
+        nonlocal oracle_calls
+        output = next(mount.source for mount in invocation.mounts if mount.destination == "/output")
+        if "MENDRUNE_ORACLE_NONCE" in invocation.environment:
+            oracle_calls += 1
+            nonce = invocation.environment["MENDRUNE_ORACLE_NONCE"]
+            # Stage-two's first accumulated check reopens the stage-one vulnerability.
+            vulnerable = oracle_calls in {1, 3, 4}
+            (output / "oracle.yaml").write_text(
+                f"schema_version: 1\nnonce: {nonce}\nvulnerable: "
+                f"{'true' if vulnerable else 'false'}\nobservation: checked\n"
+            )
+        elif invocation.argv == ("python", "/evidence/check.py"):
+            (output / "scan.json").write_text('{"version":"1","results":[],"errors":[],"paths":{}}')
+        return _result(invocation)
+
+    with pytest.raises(MendRuneError) as raised:
+        execute_phase_c(prepared, (), execute=execute)
+
+    assert raised.value.reason_code == "prior_vulnerability_reopened"
+    assert yaml.safe_load((prepared.store.path / "run.yaml").read_text())["state"] == (
+        "cumulative_failure"
+    )
+    failure = yaml.safe_load(
+        (prepared.store.path / "phase-c/stages/0002-fix-b/failure.yaml").read_text()
+    )
+    assert failure["reason_code"] == "prior_vulnerability_reopened"
     prepared.store.verify_hash_manifest()
     prepared.close()
 

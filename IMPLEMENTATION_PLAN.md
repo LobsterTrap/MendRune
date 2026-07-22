@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P8-T01/P8-T02
-- **Last completed:** P7-T03
-- **Next action:** Complete strict cumulative pre-application reproduction and accumulated verification in one Phase C worktree.
+- **Active task:** P8-T03
+- **Last completed:** P8-T02
+- **Next action:** Implement final full-stack repetition, generated cleanup, combined diff/provenance, and acceptance evidence.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -354,15 +354,17 @@
 
 ### P8-T01 — Strict cumulative pre-application reproduction
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P7
 - **Deliverables:** Current unit vulnerabilities must still reproduce; otherwise terminal `ambiguous_overlap`.
+- **Evidence recorded:** 2026-07-22 — cumulative tests require nonce-bound reproduction immediately before each unit and persist terminal `ambiguous_overlap` / `unit_vulnerability_already_mitigated` evidence before applying an overlapping patch.
 
 ### P8-T02 — Cumulative apply and accumulated rechecks
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P8-T01
 - **Deliverables:** One cumulative worktree, ordered units, all applied oracles, shared + accumulated unit regressions, scans vs previous stage.
+- **Evidence recorded:** 2026-07-22 — one cumulative worktree applies composition-ordered units, reruns all applied oracles and accumulated regressions, compares scanners stage-to-stage, persists manifests/hashes, cleans up, and detects reopened prior vulnerabilities.
 
 ### P8-T03 — Final full-stack verification and combined diff
 
