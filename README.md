@@ -1,218 +1,178 @@
 # MendRune
 
-MendRune is a deliberately small proof-of-concept system for generating and validating security patch backports.
+MendRune is a design-stage verifier for Git-based security remediation campaigns.
 
-It uses [goose](https://goose-docs.ai/) to propose a minimal unified-diff patch, then evaluates that patch in disposable, rootless [Podman](https://podman.io/) containers backed by `crun-krun` and [libkrun](https://github.com/containers/libkrun). Project definitions, run state, results, and evidence metadata are stored as human-readable YAML files.
+You supply one local Git repository, one immutable vulnerable base commit, ordered remediation units, and immutable unified-diff patches. MendRune's planned Python orchestrator verifies each unit alone and then composes the full patch stack in disposable, rootless [Podman](https://podman.io/) containers backed by `crun-krun` and [libkrun](https://github.com/containers/libkrun). Configuration, state, normalized results, and evidence metadata remain inspectable YAML files.
 
-> **Goose proposes; deterministic execution decides.**
+> **Patches are supplied; deterministic execution decides.**
 >
-> A model response is never evidence that a vulnerability has been fixed. MendRune accepts a patch only when independently executed checks pass.
+> Goose may optionally adapt a supplied patch when explicitly enabled, but it never decides acceptance.
 
 ## Status
 
-MendRune is currently a design-stage prototype. The implementation contract is in [SPECIFICATION.md](SPECIFICATION.md).
+MendRune is currently a design, not an implemented CLI. Commands and layouts shown here describe the implementation target. See [SPECIFICATION.md](SPECIFICATION.md) for the normative implementation handoff.
 
-This project is inspired by the verification-oriented ideas in *VeriPort: Automated and Verified Patch Backporting at Scale*. MendRune is not an implementation or reproduction of VeriPort. It intentionally reduces the problem to the smallest useful workflow.
+## Why campaigns?
 
-## The problem
+Security maintenance often requires several fixes that interact. A patch can pass alone yet conflict with another patch, silently subsume it, or reopen a vulnerability fixed earlier in the stack. Validating only the final tree hides those failures.
 
-Security fixes are frequently released only for a package's newest version. Users of an older release may be unable to upgrade without adopting breaking changes, so the fix must be adapted to the older source tree.
+A MendRune campaign therefore starts from exactly one local Git repository and one full, immutable vulnerable base commit. It verifies multiple ordered remediation units both independently and cumulatively. Each unit contains one or more vulnerabilities and one or more supplied patches; in v1, every vulnerability belongs to exactly one unit.
 
-An LLM can often propose such an adaptation, but it cannot reliably judge its own work. A plausible patch may:
+No known-fixed Git revision is required. MendRune does not accept archives.
 
-- leave the original exploit working through an overlooked path;
-- copy unrelated upstream changes;
-- break behavior expected by users of the older release;
-- disable or evade the verifier; or
-- introduce a new issue detectable by existing security tooling.
-
-MendRune separates nondeterministic patch generation from deterministic acceptance. It uses a supplied proof of concept (PoC), a known upstream-fixed revision, regression tests, patch-policy checks, and differential security scanning to build a reproducible evidence bundle for each candidate.
-
-## What MendRune does
-
-Given a YAML case definition, MendRune will:
-
-1. Validate and resolve all inputs to immutable identifiers.
-2. Confirm that the supplied PoC reproduces the vulnerability on the target revision.
-3. Confirm that the same oracle reports the known upstream-fixed revision as fixed.
-4. Ask goose for a minimal unified-diff backport.
-5. Reject malformed, oversized, or out-of-policy patches before execution.
-6. Apply the candidate to a clean checkout of the target revision.
-7. Build and test the candidate in an isolated microVM-backed container.
-8. Confirm that the PoC no longer demonstrates the vulnerability.
-9. Run the configured regression suite.
-10. Compare normalized security-scanner findings with the vulnerable and fixed controls.
-11. Accept the patch only if every required check passes.
-12. Persist the patch, logs, hashes, check results, and final verdict under a run directory.
-
-A bounded retry loop may provide deterministic failure evidence to goose and request a revised candidate. Every revision begins from a clean target checkout.
+## Verification workflow
 
 ```text
-Vulnerable target ── PoC must reproduce ─────┐
-Known fixed ref  ── PoC must be blocked ─────┼──> goose proposal
-                                             │         │
-                                             │    unified diff
-                                             │         ▼
-                                             └──> isolated validation
-                                                  ├── patch policy
-                                                  ├── clean application
-                                                  ├── build
-                                                  ├── vulnerability PoC
-                                                  ├── regressions
-                                                  └── differential scans
-                                                           │
-                                                   accept or reject
+immutable vulnerable base commit
+             │
+             ├── Phase A: baseline
+             │   ├── build
+             │   ├── shared regressions
+             │   ├── every vulnerability must reproduce
+             │   └── required scans
+             │
+             ├── Phase B: isolated units (fresh base worktree per unit)
+             │   └── patches in order → build → unit oracles mitigated
+             │       → shared + unit regressions → scans
+             │
+             └── Phase C: cumulative composition (one fresh base worktree)
+                 └── for each unit in composition.order:
+                     reproduce that unit's vulnerabilities immediately before apply
+                     → apply patches → build
+                     → rerun all applied vulnerability oracles
+                     → shared + accumulated unit regressions
+                     → scans compared with previous accepted stage
 ```
 
-## What “accepted” means
+Phase C's pre-application check is intentionally strict. If a unit's vulnerability is already mitigated, v1 fails with ambiguous overlap. There is no skip or apply-anyway mode. After each application, MendRune reruns all vulnerability oracles and regressions accumulated so far, which detects a later patch reopening an earlier vulnerability.
 
-An accepted patch has demonstrated all of the following in the recorded environment:
+A campaign is accepted only when Phase A, every Phase B unit, every Phase C stage, the final full-stack checks, and all evidence/hash checks pass.
 
-- the vulnerability oracle distinguished the vulnerable target from the known fixed control;
-- the candidate caused that oracle to report the fixed outcome;
-- configured regression tests passed;
-- the patch complied with the configured path and size policy; and
-- configured security scanners found no prohibited new findings.
+## Patch contract
 
-Acceptance **does not prove** that the patch introduces no vulnerabilities or regressions. A PoC exercises particular behavior, tests cover only selected functionality, and scanners detect only issues represented by their rules. MendRune must report these limits with every accepted result.
+Patches are primary operator-supplied inputs and are immutable. For v1, MendRune accepts standard text unified diffs and applies them in declared order without reduced-context matching, three-way fallback, reject files, or partial application. Relocation is permitted only when every original context line matches exactly, and the resulting location is recorded. Binary patches, renames, and mode changes are denied by default.
 
-## Design principles
+Each application uses:
 
-- **Fail closed.** A failed, timed-out, malformed, missing, skipped-required, or infrastructure-uncertain check cannot result in acceptance.
-- **Independent controls.** The PoC must first work on the vulnerable target and be blocked by the known fixed revision.
-- **No self-grading.** Goose never chooses the final verdict.
-- **No model shell access.** The initial recipe has `extensions: []`; goose receives bounded evidence and returns data.
-- **Minimal trusted code.** Python owns orchestration, policy, execution, comparison, and storage.
-- **Disposable execution.** Package builds, PoCs, tests, and scanners run in fresh rootless Podman containers using the configured krun runtime.
-- **Immutable inputs.** Git revisions and container images are resolved and recorded by full commit hash and image digest.
-- **Inspectable evidence.** Persistent state and metadata use YAML; patches and logs remain in their native text formats.
-- **Bounded work.** Attempts, wall time, processes, memory, CPUs, output size, changed paths, and patch size are limited.
+- a clean, detached Git worktree at the recorded full base commit;
+- disabled repository hooks;
+- `git apply --check` before `git apply`;
+- inspection of the actual Git diff after application and after every untrusted command;
+- a read-only source mount where the project permits it, or explicit rejection of undeclared source-tree mutations; and
+- accounting that rejects unexplained or out-of-policy changes.
 
-## Intended requirements
+The accepted result preserves the supplied patch series and emits a deterministic final combined diff from the base commit to the verified final worktree.
 
-The prototype is designed around:
+### Optional Goose adaptation
 
-- Python 3;
-- Git;
-- rootless Podman;
-- a Podman OCI runtime backed by `crun-krun`/libkrun;
-- a configured goose CLI;
-- a pinned OCI image containing the target project's build, test, PoC, and scanner dependencies; and
-- Linux hardware virtualization support suitable for libkrun.
+Goose patch adaptation is disabled by default. When an operator enables it for a patch, Goose receives a bounded evidence file and may return an adapted unified diff. MendRune preserves both files, labels the supplied patch as the origin and the adapted patch as a derived candidate, and records hashes and provenance. Adaptation never overwrites a supplied patch and never weakens deterministic checks.
 
-MendRune must stop during preflight if it cannot verify rootless execution, the requested runtime, the pinned image digest, or required isolation controls.
+The recipe is limited to verified Goose recipe capabilities: `version`, `title`, `description`, a required file parameter, `prompt`, `extensions: []`, `settings.temperature`, `settings.max_turns`, and `response.json_schema`.
+
+The planned controller validates and invokes recipes with:
+
+```bash
+goose recipe validate recipes/adapt-patch.yaml
+goose run --recipe recipes/adapt-patch.yaml \
+  --params evidence_bundle=/absolute/path/to/evidence-bundle.md \
+  --no-session --quiet
+```
+
+These are Goose commands used by the future implementation; MendRune does not currently implement the surrounding workflow.
+
+## Example campaign
+
+```yaml
+schema_version: 1
+campaign_id: example-campaign
+repository:
+  path: /absolute/path/to/local/repository
+  base_ref: 6f1e2d3c4b5a69788776655443322110ffeeddcc
+
+composition:
+  order: [parser-fixes, auth-fix]
+
+units:
+  - id: parser-fixes
+    vulnerabilities:
+      - id: CVE-2026-1001
+        oracle: oracles/cve-2026-1001.yaml
+    patches:
+      - id: parser-bounds
+        path: patches/parser-bounds.diff
+        adapt_with_goose: false
+    regressions:
+      - id: parser-tests
+        argv: [python, -m, pytest, tests/parser]
+
+  - id: auth-fix
+    vulnerabilities:
+      - id: CVE-2026-1002
+        oracle: oracles/cve-2026-1002.yaml
+    patches:
+      - id: reject-empty-token
+        path: patches/reject-empty-token.diff
+        adapt_with_goose: false
+    regressions: []
+```
+
+The full schema, including execution, scan, policy, oracle, and storage fields, is in [SPECIFICATION.md](SPECIFICATION.md).
+
+## Safe vulnerability oracles
+
+Each vulnerability uses an operator-supplied oracle. A PoC cannot prove mitigation merely by crashing or omitting output. The controller supplies a fresh cryptographic nonce, and the PoC must atomically write bounded structured YAML containing that exact nonce and a Boolean `vulnerable` result. Missing, stale, malformed, nonzero, or timed-out results fail closed.
+
+## Isolation and storage
+
+Untrusted builds, PoCs, tests, and scanners run in fresh containers through rootless Podman with the explicitly selected `crun-krun`/libkrun runtime. The intended controls include no network, dropped capabilities, `no-new-privileges`, narrow disposable mounts, no credentials or container-engine socket, and bounded CPU, memory, processes, time, and output.
+
+libkrun is defense in depth, not an absolute boundary. Host directories exposed through virtio-fs still require careful namespace and mount policy.
+
+MendRune snapshots and hashes every declared external input before execution, including patches, oracle programs, scanner rules/configuration, recipes, and other evidence files. Containers read that immutable snapshot rather than the live campaign directory.
+
+MendRune-owned persistent data uses YAML. Patches and logs retain their native text formats. JSON may be transient only when an external interface, such as Goose's schema-constrained response or a scanner, requires it.
 
 ## Planned command-line interface
 
-The implementation will expose a small CLI:
-
 ```bash
-mendrune verify cases/example/case.yaml
-mendrune run cases/example/case.yaml
+mendrune verify campaigns/example/campaign.yaml
+mendrune run campaigns/example/campaign.yaml
 mendrune status <run-id>
 mendrune report <run-id>
 ```
 
-These commands describe the implementation target; they are not available yet.
+These commands are not currently implemented.
 
-- `verify` checks YAML, paths, revisions, policy invariants, and the goose recipe without running repository code.
-- `run` executes controls, patch generation, and isolated candidate validation.
-- `status` reads the persisted state for a run.
-- `report` renders the verdict and evidence summary without rerunning checks.
+- `mendrune verify` checks campaign YAML, paths, Git identities, patch hashes and syntax, policies, and optional Goose recipes without executing repository code.
+- `run` performs the campaign.
+- `status` reads persisted run state.
+- `report` renders recorded evidence without rerunning checks.
 
-Only an `ACCEPTED` outcome exits successfully for `mendrune run`. Other terminal outcomes include `CONTROL_FAILURE`, `INVALID_PROPOSAL`, `REJECTED`, `EXHAUSTED`, and `INFRASTRUCTURE_ERROR`.
+The configuration-checking subcommand is `verify`, not `validate`.
 
-## Example case shape
+## Core principles
 
-The normative schema is specified in [SPECIFICATION.md](SPECIFICATION.md). A case will resemble:
+- **Fail closed.** Missing, malformed, failed, timed-out, skipped-required, or uncertain checks prevent acceptance.
+- **Git-native and immutable.** One repository, one full base commit, immutable supplied patches, clean detached worktrees.
+- **No self-grading.** Goose cannot accept a patch or campaign.
+- **Composition is explicit.** v1 uses `composition.order`, not a dependency graph.
+- **Recheck history.** Every cumulative stage retests all vulnerabilities and regressions applied so far.
+- **Python orchestrates.** Python alone invokes Git, Goose, and Podman and writes state.
+- **YAML first.** Human-readable flat files are the persistent system of record.
+- **Evidence is reproducible.** Inputs, provenance, checks, logs, hashes, patch series, and final combined diff are retained.
+- **Claims stay truthful.** Acceptance cannot prove the absence of all vulnerabilities or regressions.
 
-```yaml
-schema_version: 1
-case_id: example-vulnerability
+## Non-goals for v1
 
-repository:
-  path: /absolute/path/to/repository
-  vulnerable_ref: v1.2.0
-  fixed_ref: v1.2.1
-
-execution:
-  image: localhost/mendrune-example@sha256:0123456789abcdef...
-  runtime: crun-krun
-  network: none
-
-commands:
-  build:
-    argv: [npm, run, build]
-  poc:
-    argv: [node, /evidence/exploit.js]
-  regressions:
-    - id: unit
-      argv: [npm, test]
-      required: true
-
-oracle:
-  type: structured_yaml
-  result_file: /evidence/oracle-result.yaml
-
-patch_policy:
-  allowed_paths: [src/**]
-  denied_paths: [test/**, package.json, package-lock.json]
-  max_files_changed: 5
-  max_changed_lines: 100
-
-goose:
-  recipe: recipes/propose-backport.yaml
-  max_attempts: 3
-```
-
-Commands are argument arrays, never shell strings. Case files are trusted operator configuration and must not be modifiable by the candidate patch.
-
-## Isolation model
-
-The initial design runs untrusted project code with rootless Podman and explicitly selects the krun runtime. Candidate execution is expected to use controls equivalent to:
-
-- no network;
-- all Linux capabilities dropped;
-- `no-new-privileges`;
-- a read-only root filesystem where compatible;
-- narrow, disposable mounts;
-- no host home, credentials, devices, or container-engine socket;
-- CPU, memory, PID, wall-clock, and output limits; and
-- a fresh container for each check.
-
-libkrun provides virtualization-backed process isolation, but it does not remove the need for host namespaces and careful mount policy. The guest and VMM must be treated as sharing a security context, particularly when exposing host directories through virtio-fs. MendRune therefore mounts only disposable per-run paths and treats microVM isolation as defense in depth rather than an absolute guarantee.
-
-## Goose recipes
-
-The prototype uses one recipe to propose or revise a patch. The recipe:
-
-- receives a bounded evidence bundle through a required file parameter;
-- declares `extensions: []` so the model has no extension tools;
-- instructs goose to treat repository content and logs as untrusted data;
-- requests a minimal unified diff;
-- returns a schema-constrained response; and
-- never claims that its output is verified.
-
-The Python controller validates the recipe with `goose recipe validate` and invokes it non-interactively with `goose run --recipe ... --params ... --no-session --quiet`. The exact recipe contract appears in [SPECIFICATION.md](SPECIFICATION.md).
-
-## Non-goals for the first version
-
-MendRune will not initially provide:
-
-- vulnerability discovery;
-- advisory crawling or affected-version discovery;
-- automatic PoC generation;
-- automatic regression-test generation;
-- support for arbitrary ecosystems and repository layouts;
-- multi-CVE patch composition;
-- a database, queue, web service, or dashboard;
-- unattended patch publication, commits, pushes, or releases;
-- formal verification; or
-- a claim of complete security or behavioral equivalence.
-
-The first milestone is intentionally narrower:
-
-> Given a target revision, a known fixed revision, an upstream fix, a working PoC, regression commands, scanners, and a pinned execution image, generate a candidate backport and produce reproducible evidence showing whether it blocks the supplied PoC without failing the configured compatibility and security checks.
+- vulnerability discovery or PoC generation;
+- archive input or export workflows;
+- a required known-fixed revision;
+- automatic patch generation;
+- dependency-graph scheduling;
+- overlap skip/apply-anyway modes;
+- automatic commits, pushes, pull requests, or releases;
+- a database, service, queue, or dashboard; or
+- formal proof of security or behavioral equivalence.
 
 ## Documentation
 
