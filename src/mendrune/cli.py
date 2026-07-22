@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from mendrune import __version__
-from mendrune.errors import ConfigurationError, ExitCode
+from mendrune.errors import ConfigurationError, ExitCode, MendRuneError
+from mendrune.reporting import report, status
 from mendrune.verify import verify_campaign
 
 
@@ -18,6 +19,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Verify ordered security remediation campaigns.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--runs-root",
+        type=Path,
+        default=Path("runs"),
+        help="Stored run directory (default: runs).",
+    )
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
@@ -56,6 +63,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"verified campaign {verified.config.campaign_id} "
             f"at base commit {verified.repository.base_commit}"
         )
+        return ExitCode.SUCCESS
+
+    if args.command in {"status", "report"}:
+        try:
+            rendered = (
+                status(args.runs_root, args.run_id)
+                if args.command == "status"
+                else report(args.runs_root, args.run_id)
+            )
+        except MendRuneError as exc:
+            print(f"{exc.reason_code}: {exc}", file=sys.stderr)
+            return ExitCode.CONFIGURATION_ERROR
+        print(rendered, end="")
         return ExitCode.SUCCESS
 
     print(f"{args.command!r} is not implemented yet", file=sys.stderr)

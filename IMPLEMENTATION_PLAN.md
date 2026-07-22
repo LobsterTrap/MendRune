@@ -9,9 +9,9 @@
 ## Current handoff
 
 - **Current phase:** P3/P4/P5 — deterministic execution primitives
-- **Active task:** P5-T02
-- **Last completed:** P3-T05
-- **Next action:** Implement executor timeout/kill/remove with independently bounded stdout/stderr capture and cleanup evidence.
+- **Active task:** P5-T03
+- **Last completed:** P5-T02
+- **Next action:** Complete strict runtime preflight qualification, then runtime security tests and Phase A orchestration.
 - **Known blockers:** Real `crun-krun` runtime tests require a qualified rootless Podman/KVM host. This host currently has rootless Podman 5.8.4, `/usr/bin/krun`, `/dev/kvm`, and crun built with libkrun, but qualified runtime tests are not implemented yet.
 - **Checkpoint state:** Documentation, Astral tooling, lockfile, package scaffold, configuration verification, evidence/storage primitives, Git worktrees, strict patch parsing, oracle/scanner comparison, and Podman command construction are committed together as the first implementation checkpoint.
 - **Resume protocol:** Run `uv sync --locked --group dev`, then the four quality gates in P0-T04. Read P3-T04/P3-T05 before editing. Do not begin Phase A orchestration until P3–P5 primitives and their negative tests are complete.
@@ -187,9 +187,10 @@
 
 ### P2-T04 — Implement deterministic reporting skeleton
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P2-T02–P2-T03
 - **Deliverables:** `status` and `report` read stored evidence only; mandatory limitation wording.
+- **Evidence recorded:** 2026-07-22 — deterministic stored-record rendering, mandatory limitations, missing/invalid evidence failures, no live repository reads, and CLI status/report tests pass.
 
 ---
 
@@ -244,15 +245,17 @@
 
 ### P4-T02 — Regression scheduling
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P1–P2
 - **Deliverables:** Shared/unit/accumulated selection and required-result records.
+- **Evidence recorded:** 2026-07-22 — deterministic shared, isolated, and composition-prefix accumulation schedules plus all required result states pass focused tests.
 
 ### P4-T03 — First scanner adapter and normalization
 
-- **Status:** NOT_STARTED
+- **Status:** DONE
 - **Depends on:** P1–P2
 - **Deliverables:** Semgrep adapter; canonical identity/fingerprint, severity mapping, stable sorting/deduplication, malformed output failure.
+- **Evidence recorded:** 2026-07-22 — strict native Semgrep JSON schema/error/path/severity validation and deterministic canonical normalization pass focused tests.
 
 ### P4-T04 — Differential scanner comparison
 
@@ -275,10 +278,11 @@
 
 ### P5-T02 — Process lifecycle and bounded capture
 
-- **Status:** IN_PROGRESS
+- **Status:** DONE
 - **Owner/date:** goose / 2026-07-22
 - **Depends on:** P5-T01, P2
 - **Deliverables:** Timeout, kill/remove, separate bounded stdout/stderr, truncation metadata, container metadata, cleanup uncertainty.
+- **Evidence recorded:** 2026-07-22 — mocked lifecycle tests prove argv execution with `shell=False`, unique named containers, timeout kill/remove, independent bounded captures, metadata, launch failure, and fail-closed cleanup uncertainty.
 
 ### P5-T03 — Runtime preflight
 

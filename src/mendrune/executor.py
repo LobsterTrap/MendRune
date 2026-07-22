@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from mendrune.errors import MendRuneError
 from mendrune.models import ExecutionConfig
@@ -27,13 +32,37 @@ class Invocation:
     timeout_seconds: int
 
 
-def build_podman_command(config: ExecutionConfig, invocation: Invocation) -> list[str]:
+@dataclass(frozen=True)
+class CapturedOutput:
+    data: bytes
+    total_bytes: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    argv: tuple[str, ...]
+    exit_code: int | None
+    timed_out: bool
+    started_at: datetime
+    duration_ms: int
+    container_name: str
+    image: str
+    runtime: str
+    stdout: CapturedOutput
+    stderr: CapturedOutput
+
+
+def build_podman_command(
+    config: ExecutionConfig, invocation: Invocation, *, container_name: str | None = None
+) -> list[str]:
     if invocation.image != config.image:
         raise MendRuneError("invocation image mismatch", reason_code="image_digest_mismatch")
     command = [
         "podman",
         "run",
-        "--rm",
+        "--name",
+        container_name or f"mendrune-{uuid.uuid4().hex}",
         "--runtime",
         config.runtime,
         "--network",
@@ -70,6 +99,120 @@ def build_podman_command(config: ExecutionConfig, invocation: Invocation) -> lis
     command.append(config.image)
     command.extend(invocation.argv)
     return command
+
+
+def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
+    """Run one named Podman container and return independently bounded output."""
+    container_name = f"mendrune-{uuid.uuid4().hex}"
+    command = build_podman_command(config, invocation, container_name=container_name)
+    started_at = datetime.now(UTC)
+    started = time.monotonic()
+    process: subprocess.Popen[bytes] | None = None
+    stdout = _Capture(config.maximum_output_bytes)
+    stderr = _Capture(config.maximum_output_bytes)
+    readers: list[threading.Thread] = []
+    timed_out = False
+    lifecycle_error: Exception | None = None
+    launch_error: OSError | None = None
+
+    try:
+        process = subprocess.Popen(
+            command,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"},
+        )
+        if process.stdout is None or process.stderr is None:
+            raise OSError("Podman output pipes unavailable")
+        readers = [
+            threading.Thread(target=stdout.read, args=(process.stdout,), daemon=True),
+            threading.Thread(target=stderr.read, args=(process.stderr,), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout=invocation.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            lifecycle_error = _container_command("kill", "--ignore", container_name)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=30)
+    except OSError as exc:
+        launch_error = exc
+    finally:
+        for reader in readers:
+            reader.join(timeout=30)
+        if any(reader.is_alive() for reader in readers) and lifecycle_error is None:
+            lifecycle_error = RuntimeError("container output capture did not finish")
+        cleanup_error = _container_command("rm", "--force", "--ignore", container_name)
+        if lifecycle_error is None:
+            lifecycle_error = cleanup_error
+
+    if lifecycle_error is not None:
+        raise MendRuneError(
+            f"container cleanup uncertain: {lifecycle_error}", reason_code="cleanup_uncertain"
+        ) from lifecycle_error
+    if launch_error is not None:
+        raise MendRuneError(
+            "Podman container launch failed", reason_code="container_launch_failed"
+        ) from launch_error
+    if process is None:
+        raise MendRuneError("Podman container launch failed", reason_code="container_launch_failed")
+    return ExecutionResult(
+        argv=tuple(command),
+        exit_code=process.returncode,
+        timed_out=timed_out,
+        started_at=started_at,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        container_name=container_name,
+        image=invocation.image,
+        runtime=config.runtime,
+        stdout=stdout.result(),
+        stderr=stderr.result(),
+    )
+
+
+class _Capture:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+        self.total_bytes = 0
+
+    def read(self, stream: BinaryIO) -> None:
+        while chunk := stream.read(64 * 1024):
+            self.total_bytes += len(chunk)
+            remaining = self.limit - len(self.data)
+            if remaining > 0:
+                self.data.extend(chunk[:remaining])
+
+    def result(self) -> CapturedOutput:
+        return CapturedOutput(
+            data=bytes(self.data),
+            total_bytes=self.total_bytes,
+            truncated=self.total_bytes > self.limit,
+        )
+
+
+def _container_command(*args: str) -> Exception | None:
+    try:
+        result = subprocess.run(
+            ["podman", *args],
+            shell=False,
+            check=False,
+            capture_output=True,
+            timeout=30,
+            env={"PATH": os.environ.get("PATH", ""), "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return exc
+    if result.returncode != 0:
+        return RuntimeError(f"podman {args[0]} failed with exit code {result.returncode}")
+    return None
 
 
 def preflight(config: ExecutionConfig) -> None:

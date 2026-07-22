@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Any
 
 from mendrune.errors import MendRuneError
+
+_SEMGREP_SEVERITIES = {"INFO": "info", "WARNING": "medium", "ERROR": "high"}
+_SEMGREP_TOP_LEVEL_FIELDS = {
+    "version",
+    "results",
+    "errors",
+    "paths",
+    "time",
+    "engine_requested",
+    "skipped_rules",
+    "interfile_languages_used",
+}
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,37 @@ def derive_fingerprint(
     digest = hashlib.sha256()
     digest.update("\x00".join(values).encode("utf-8"))
     return digest.hexdigest()
+
+
+def normalize_semgrep_json(
+    output: bytes | str, severity_order: tuple[str, ...]
+) -> tuple[Finding, ...]:
+    """Strictly adapt Semgrep's native JSON output to canonical findings."""
+    try:
+        document: Any = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MendRuneError(
+            "Semgrep output is invalid JSON", reason_code="scanner_output_invalid"
+        ) from exc
+    if (
+        not isinstance(document, dict)
+        or not {"version", "results", "errors", "paths"} <= document.keys()
+        or set(document) - _SEMGREP_TOP_LEVEL_FIELDS
+        or not isinstance(document["version"], str)
+        or not isinstance(document["paths"], dict)
+    ):
+        raise MendRuneError(
+            "Semgrep output has an invalid schema", reason_code="scanner_output_invalid"
+        )
+    results = document.get("results")
+    errors = document.get("errors")
+    if not isinstance(results, list) or not isinstance(errors, list) or errors:
+        raise MendRuneError(
+            "Semgrep output reports errors or has an invalid schema",
+            reason_code="scanner_output_invalid",
+        )
+    findings = [_semgrep_finding(result) for result in results]
+    return normalize_findings(findings, severity_order)
 
 
 def normalize_findings(
@@ -90,6 +135,60 @@ def compare_findings(
         prohibited=tuple(sorted(prohibited, key=identity_key)),
         introduced=tuple(sorted(introduced, key=identity_key)),
         severity_increases=tuple(sorted(increases, key=identity_key)),
+    )
+
+
+def _semgrep_finding(value: Any) -> Finding:
+    if not isinstance(value, dict) or set(value) != {"check_id", "path", "start", "end", "extra"}:
+        raise MendRuneError(
+            "Semgrep result has an invalid schema", reason_code="scanner_output_invalid"
+        )
+    check_id, raw_path, start, extra = (
+        value["check_id"],
+        value["path"],
+        value["start"],
+        value["extra"],
+    )
+    if (
+        not isinstance(check_id, str)
+        or not check_id
+        or not isinstance(raw_path, str)
+        or not isinstance(start, dict)
+        or set(start) != {"line", "col", "offset"}
+        or type(start["line"]) is not int
+        or start["line"] <= 0
+        or not isinstance(extra, dict)
+        or not {"message", "severity", "fingerprint"} <= extra.keys()
+        or not isinstance(extra["message"], str)
+        or not isinstance(extra["severity"], str)
+        or not isinstance(extra["fingerprint"], str)
+        or not extra["fingerprint"]
+    ):
+        raise MendRuneError(
+            "Semgrep result has invalid field types", reason_code="scanner_output_invalid"
+        )
+    severity = _SEMGREP_SEVERITIES.get(extra["severity"])
+    path = PurePosixPath(raw_path)
+    if (
+        severity is None
+        or not raw_path
+        or "\\" in raw_path
+        or path.as_posix() != raw_path
+        or path.is_absolute()
+        or ".." in path.parts
+        or "." in path.parts
+    ):
+        raise MendRuneError(
+            "Semgrep result has invalid severity or path", reason_code="scanner_output_invalid"
+        )
+    return Finding(
+        "semgrep",
+        check_id,
+        severity,
+        path,
+        start["line"],
+        extra["fingerprint"],
+        extra["message"],
     )
 
 

@@ -1,6 +1,16 @@
+import json
 from pathlib import PurePosixPath
 
-from mendrune.scanner import Finding, compare_findings, derive_fingerprint, normalize_findings
+import pytest
+
+from mendrune.errors import MendRuneError
+from mendrune.scanner import (
+    Finding,
+    compare_findings,
+    derive_fingerprint,
+    normalize_findings,
+    normalize_semgrep_json,
+)
 
 ORDER = ("info", "low", "medium", "high", "critical")
 
@@ -15,6 +25,83 @@ def finding(fingerprint: str, severity: str = "medium", line: int = 10) -> Findi
         fingerprint=fingerprint,
         message="finding",
     )
+
+
+def semgrep_result(
+    *, path: str = "src/a.py", severity: str = "WARNING", fingerprint: str = "stable"
+) -> dict[str, object]:
+    return {
+        "check_id": "python.security.rule",
+        "path": path,
+        "start": {"line": 12, "col": 1, "offset": 100},
+        "end": {"line": 12, "col": 5, "offset": 104},
+        "extra": {
+            "message": "unsafe call",
+            "severity": severity,
+            "fingerprint": fingerprint,
+            "lines": "unsafe()",
+            "metadata": {},
+        },
+    }
+
+
+def semgrep_output(results: list[dict[str, object]]) -> str:
+    return json.dumps({"version": "1.100.0", "results": results, "errors": [], "paths": {}})
+
+
+def test_semgrep_adapter_produces_deterministic_canonical_findings() -> None:
+    low = semgrep_result(severity="INFO", fingerprint="z")
+    duplicate = semgrep_result(severity="ERROR", fingerprint="z")
+    first = semgrep_result(path="src/z.py", fingerprint="a")
+    normalized = normalize_semgrep_json(semgrep_output([low, duplicate, first]), ORDER)
+    assert [(item.fingerprint, item.severity, item.path.as_posix()) for item in normalized] == [
+        ("a", "medium", "src/z.py"),
+        ("z", "high", "src/a.py"),
+    ]
+    assert normalized[0].scanner_id == "semgrep"
+    assert normalized[0].rule_id == "python.security.rule"
+    assert normalized[0].line == 12
+
+
+@pytest.mark.parametrize("output", [b"not JSON", "[]", '{"results": [], "errors": []}'])
+def test_semgrep_adapter_rejects_malformed_output(output: bytes | str) -> None:
+    with pytest.raises(MendRuneError, match="Semgrep output") as error:
+        normalize_semgrep_json(output, ORDER)
+    assert error.value.reason_code == "scanner_output_invalid"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("path", "/tmp/a.py"), ("path", "../a.py"), ("severity", "CRITICAL")],
+)
+def test_semgrep_adapter_rejects_invalid_path_or_severity(field: str, value: str) -> None:
+    result = semgrep_result()
+    if field == "severity":
+        extra = result["extra"]
+        assert isinstance(extra, dict)
+        result["extra"] = {**extra, "severity": value}
+    else:
+        result[field] = value
+    with pytest.raises(MendRuneError, match="invalid severity or path") as error:
+        normalize_semgrep_json(semgrep_output([result]), ORDER)
+    assert error.value.reason_code == "scanner_output_invalid"
+
+
+def test_semgrep_adapter_rejects_reported_errors_and_result_schema() -> None:
+    reported_error = json.dumps(
+        {
+            "version": "1.100.0",
+            "results": [],
+            "errors": [{"message": "parse failed"}],
+            "paths": {},
+        }
+    )
+    with pytest.raises(MendRuneError, match="reports errors"):
+        normalize_semgrep_json(reported_error, ORDER)
+    result = semgrep_result()
+    del result["end"]
+    with pytest.raises(MendRuneError, match="invalid schema"):
+        normalize_semgrep_json(semgrep_output([result]), ORDER)
 
 
 def test_fingerprint_is_stable() -> None:
