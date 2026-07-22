@@ -32,12 +32,12 @@
 
 | Phase | Goal | Status | Depends on |
 |---|---|---|---|
-| P0 | Foundation, Astral tooling, packaging, test harness | IN_PROGRESS | — |
-| P1 | Typed YAML campaign model and `mendrune verify` | NOT_STARTED | P0 |
-| P2 | Safe storage, state machine, evidence capture | NOT_STARTED | P1 |
-| P3 | Git worktrees, strict patches, tree integrity | NOT_STARTED | P1–P2 |
-| P4 | Deterministic oracle, regressions, scanner logic | NOT_STARTED | P1–P2 |
-| P5 | Podman/krun executor and preflight | NOT_STARTED | P1–P2 |
+| P0 | Foundation, Astral tooling, packaging, test harness | DONE | — |
+| P1 | Typed YAML campaign model and `mendrune verify` | DONE | P0 |
+| P2 | Safe storage, state machine, evidence capture | DONE | P1 |
+| P3 | Git worktrees, strict patches, tree integrity | DONE | P1–P2 |
+| P4 | Deterministic oracle, regressions, scanner logic | DONE | P1–P2 |
+| P5 | Podman/krun executor and preflight | IN_PROGRESS | P1–P2 |
 | P6 | Phase A baseline vertical slice | NOT_STARTED | P3–P5 |
 | P7 | Phase B isolated remediation units | NOT_STARTED | P6 |
 | P8 | Phase C cumulative composition and final verdict | NOT_STARTED | P7 |
