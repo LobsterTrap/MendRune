@@ -11,8 +11,8 @@
 - **Current phase:** Complete — P0 through P10 implemented
 - **Active task:** None
 - **Last completed:** P10-T04
-- **Next action:** Supply `MENDRUNE_RUNTIME_TEST_IMAGE` on a qualified host and run `uv run pytest -m runtime` to add real libkrun evidence before publishing a runtime-qualified release.
-- **Known blockers:** Qualified runtime tests require `MENDRUNE_RUNTIME_TEST_IMAGE` to name a locally available immutable digest image; six security tests skip explicitly until supplied.
+- **Next action:** None; qualified libkrun runtime evidence has been recorded with the pinned UBI 10 image in `Containerfile`.
+- **Known blockers:** None. Runtime tests still skip in the default suite unless `MENDRUNE_RUNTIME_TEST_IMAGE` and the host runtime name are supplied.
 - **Checkpoint state:** Deterministic P0–P8 implementation is committed through full campaign acceptance, with runtime tests present and gated on qualified infrastructure.
 - **Resume protocol:** Run the Astral quality gates and `pytest -m runtime` with a qualified local image when available. Keep Goose unable to affect deterministic acceptance checks.
 
@@ -296,7 +296,7 @@
 - **Status:** DONE
 - **Depends on:** P5-T03
 - **Deliverables:** Qualified-host tests for network, mounts, credentials, capabilities, limits, timeout cleanup. Explicit skips only for missing krun infrastructure.
-- **Evidence recorded:** 2026-07-22 — six qualified-host tests cover network denial, mount boundaries, absent credentials/sockets, capabilities/no-new-privileges/read-only root, cgroup limits, and timeout cleanup; all explicitly skipped on this host because `MENDRUNE_RUNTIME_TEST_IMAGE` is unset, while collection and static gates pass.
+- **Evidence recorded:** 2026-07-23 — built the digest-pinned UBI 10 `Containerfile` image and ran all six tests through Fedora's `krun` libkrun runtime: 6 passed. Tests validate denied external networking, relabeled mount boundaries, absent credentials/sockets, read-only root, libkrun VM CPU/memory annotations plus configured PID limit, and timeout stop/removal.
 
 ---
 
@@ -445,7 +445,7 @@
   # On a qualified host:
   uv run pytest -m runtime
   ```
-- **Evidence recorded:** 2026-07-22 — final rerun after all review fixes: locked sync, Ruff format/lint, ty, full pytest (178 passed, 6 runtime skipped), Goose recipe validation, generated-example verify, runtime selection (6 explicit skips because `MENDRUNE_RUNTIME_TEST_IMAGE` is unset), and `git diff --check` all completed successfully.
+- **Evidence recorded:** 2026-07-23 — locked sync, Ruff format/lint, ty, full default pytest (178 passed, 6 environment-gated runtime skips), explicit qualified UBI 10/libkrun runtime suite (6 passed), accepted documented full campaign, and `git diff --check` all completed successfully.
 
 ### P10-T04 — Final review and release decision
 

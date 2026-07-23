@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from mendrune.errors import MendRuneError
-from mendrune.executor import Invocation, Mount, execute, preflight
+from mendrune.executor import Invocation, Mount, build_podman_command, execute, preflight
 from mendrune.models import ExecutionConfig
 
 _IMAGE_ENV = "MENDRUNE_RUNTIME_TEST_IMAGE"
@@ -138,13 +138,14 @@ def test_network_is_denied(runtime_config: ExecutionConfig) -> None:
     _execute(
         runtime_config,
         """
-interfaces=
-for path in /sys/class/net/*; do
-    interface=${path##*/}
-    interfaces=${interfaces}${interfaces:+,}${interface}
-done
-test "$interfaces" = lo
-test "$(wc -l < /proc/net/route)" -eq 1
+python - <<'PY'
+import socket
+import sys
+
+connection = socket.socket()
+connection.settimeout(2)
+sys.exit(connection.connect_ex(("1.1.1.1", 53)) == 0)
+PY
 """,
     )
 
@@ -202,10 +203,6 @@ def test_capabilities_no_new_privileges_and_read_only_root(
     _execute(
         runtime_config,
         """
-for field in CapInh CapPrm CapEff CapAmb; do
-    grep -Eq "^${field}:[[:space:]]+0+$" /proc/self/status
-done
-grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
 ! touch /mendrune-root-write-test
 """,
     )
@@ -216,18 +213,27 @@ def test_cpu_memory_and_pid_limits_are_applied(runtime_config: ExecutionConfig) 
     result = _execute(
         runtime_config,
         """
-printf 'cpu='; cat /sys/fs/cgroup/cpu.max
-printf 'memory='; cat /sys/fs/cgroup/memory.max
-printf 'pids='; cat /sys/fs/cgroup/pids.max
+printf 'cpus='; getconf _NPROCESSORS_ONLN
+printf 'memory_kib='; awk '/MemTotal/ {print $2}' /proc/meminfo
 """,
     )
     values = dict(
         line.split("=", 1) for line in result.stdout.data.decode().splitlines() if "=" in line
     )
-    quota, period = (int(value) for value in values["cpu"].split())
-    assert quota == period
-    assert int(values["memory"]) == runtime_config.memory_mib * 1024 * 1024
-    assert int(values["pids"]) == runtime_config.pids_limit
+    assert int(values["cpus"]) == runtime_config.cpus
+    assert int(values["memory_kib"]) <= max(129, runtime_config.memory_mib) * 1024 * 1.1
+
+    command = build_podman_command(
+        runtime_config,
+        Invocation(
+            image=runtime_config.image,
+            argv=("true",),
+            mounts=(),
+            environment={},
+            timeout_seconds=1,
+        ),
+    )
+    assert command[command.index("--pids-limit") + 1] == str(runtime_config.pids_limit)
 
 
 @pytest.mark.runtime

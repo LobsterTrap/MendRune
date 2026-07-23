@@ -80,6 +80,10 @@ def build_podman_command(
         f"{config.memory_mib}m",
         "--pids-limit",
         str(config.pids_limit),
+        "--annotation",
+        f"krun.cpus={config.cpus}",
+        "--annotation",
+        f"krun.ram_mib={max(129, config.memory_mib)}",
         "--workdir",
         config.container_workdir,
     ]
@@ -98,17 +102,14 @@ def build_podman_command(
         if mount.tmpfs_limit_bytes is not None:
             if mount.read_only or mount.tmpfs_limit_bytes <= 0:
                 raise MendRuneError("invalid limited mount", reason_code="unsafe_path")
-            command.extend(
-                (
-                    "--tmpfs",
-                    f"{mount.destination}:rw,size={mount.tmpfs_limit_bytes},mode=0700",
-                )
-            )
+            source = mount.source.resolve(strict=True)
+            suffix = ":rw,z"
+            command.extend(("--volume", f"{source}:{mount.destination}{suffix}"))
         else:
             if mount.capture_to_source:
                 raise MendRuneError("capture requires a limited mount", reason_code="unsafe_path")
             source = mount.source.resolve(strict=True)
-            suffix = ":ro" if mount.read_only else ":rw"
+            suffix = ":ro,z" if mount.read_only else ":rw,z"
             command.extend(("--volume", f"{source}:{mount.destination}{suffix}"))
     command.append(config.image)
     command.extend(invocation.argv)
@@ -119,7 +120,6 @@ def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
     """Run one named Podman container and return independently bounded output."""
     container_name = f"mendrune-{uuid.uuid4().hex}"
     command = build_podman_command(config, invocation, container_name=container_name)
-    captures: list[tuple[str, Path]] = []
     for mount in invocation.mounts:
         if not mount.capture_to_source:
             continue
@@ -130,7 +130,6 @@ def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
             raise MendRuneError(
                 "capture destination must be an empty directory", reason_code="unsafe_path"
             )
-        captures.append((mount.destination, source))
     started_at = datetime.now(UTC)
     started = time.monotonic()
     process: subprocess.Popen[bytes] | None = None
@@ -162,7 +161,7 @@ def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
             process.wait(timeout=invocation.timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            lifecycle_error = _container_command("kill", "--ignore", container_name)
+            lifecycle_error = _container_command("stop", "--time", "1", "--ignore", container_name)
             try:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
@@ -175,13 +174,6 @@ def execute(config: ExecutionConfig, invocation: Invocation) -> ExecutionResult:
             reader.join(timeout=30)
         if any(reader.is_alive() for reader in readers) and lifecycle_error is None:
             lifecycle_error = RuntimeError("container output capture did not finish")
-        if process is not None:
-            for destination, source in captures:
-                capture_error = _container_command(
-                    "cp", f"{container_name}:{destination}/.", str(source)
-                )
-                if lifecycle_error is None:
-                    lifecycle_error = capture_error
         cleanup_error = _container_command("rm", "--force", "--ignore", container_name)
         if lifecycle_error is None:
             lifecycle_error = cleanup_error

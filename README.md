@@ -101,7 +101,17 @@ MENDRUNE_EXAMPLE_IMAGE_DIGEST='sha256:<64-lowercase-hex-digits>' \
   uv run python campaigns/example/setup.py
 ```
 
-Then run only on a host that satisfies the rootless Podman and `crun-krun`/libkrun preflight:
+The checked-in `Containerfile` builds the test image from a digest-pinned Red Hat Universal Base Image 10 base. Build it rootlessly, inspect its resulting manifest digest, and configure the actual libkrun runtime executable installed by the host (`krun` on Fedora):
+
+```bash
+podman build --pull=never --format=oci \
+  -t localhost/mendrune-example:runtime-v1 -f Containerfile .
+IMAGE_DIGEST="$(podman image inspect localhost/mendrune-example:runtime-v1 --format '{{.Digest}}')"
+MENDRUNE_EXAMPLE_IMAGE_DIGEST="$IMAGE_DIGEST" uv run python campaigns/example/setup.py
+# Set execution.runtime to the host's libkrun-enabled runtime name when it is not crun-krun.
+```
+
+Then run only on a host that satisfies the rootless Podman and libkrun preflight:
 
 ```bash
 uv run mendrune run campaigns/example/generated/campaign.yaml

@@ -43,11 +43,13 @@ def test_builds_hardened_podman_command(tmp_path: Path) -> None:
     assert command[command.index("--network") :][:2] == ["--network", "none"]
     assert command[command.index("--cap-drop") :][:2] == ["--cap-drop", "all"]
     assert "no-new-privileges" in command
-    assert any(value.endswith(":/evidence:ro") for value in command)
+    assert any(value.endswith(":/evidence:ro,z") for value in command)
+    assert f"krun.cpus={execution.cpus}" in command
+    assert f"krun.ram_mib={execution.memory_mib}" in command
     assert execution.image in command
 
 
-def test_builds_bounded_tmpfs_and_capture_mount(tmp_path: Path) -> None:
+def test_builds_confined_capture_mount(tmp_path: Path) -> None:
     output = tmp_path / "output"
     output.mkdir()
     invocation = Invocation(
@@ -60,9 +62,7 @@ def test_builds_bounded_tmpfs_and_capture_mount(tmp_path: Path) -> None:
 
     command = build_podman_command(config(), invocation, container_name="bounded")
 
-    assert "--tmpfs" in command
-    assert "/output:rw,size=4096,mode=0700" in command
-    assert not any(str(output) in item for item in command)
+    assert any(value.endswith(":/output:rw,z") for value in command)
 
 
 def test_rejects_unapproved_environment(tmp_path: Path) -> None:
@@ -150,7 +150,14 @@ def test_timeout_kills_then_removes_named_container() -> None:
     assert result.timed_out is True
     assert result.exit_code == mocked_process.returncode
     name = result.container_name
-    assert run.call_args_list[0].args[0] == ["podman", "kill", "--ignore", name]
+    assert run.call_args_list[0].args[0] == [
+        "podman",
+        "stop",
+        "--time",
+        "1",
+        "--ignore",
+        name,
+    ]
     assert run.call_args_list[1].args[0] == ["podman", "rm", "--force", "--ignore", name]
 
 
