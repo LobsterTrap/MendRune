@@ -80,6 +80,8 @@ def build_podman_command(
         f"{config.memory_mib}m",
         "--pids-limit",
         str(config.pids_limit),
+        "--ulimit",
+        f"fsize={config.maximum_output_bytes}:{config.maximum_output_bytes}",
         "--annotation",
         f"krun.cpus={config.cpus}",
         "--annotation",

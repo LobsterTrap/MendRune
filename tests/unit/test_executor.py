@@ -44,6 +44,7 @@ def test_builds_hardened_podman_command(tmp_path: Path) -> None:
     assert command[command.index("--cap-drop") :][:2] == ["--cap-drop", "all"]
     assert "no-new-privileges" in command
     assert any(value.endswith(":/evidence:ro,z") for value in command)
+    assert f"fsize={execution.maximum_output_bytes}:{execution.maximum_output_bytes}" in command
     assert f"krun.cpus={execution.cpus}" in command
     assert f"krun.ram_mib={execution.memory_mib}" in command
     assert execution.image in command
